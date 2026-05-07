@@ -1,0 +1,112 @@
+apiVersion: nas-csi.dev/v1alpha1
+kind: HostConfig
+
+truenas:
+  url: wss://127.0.0.1/api/current
+  apiKeyFile: /etc/nas-csi/secrets/truenas-api-key
+
+hostTools:
+  virsh: /usr/bin/virsh
+  qemuImg: /usr/bin/qemu-img
+  virtiofsd: /usr/libexec/virtiofsd
+  systemctl: /usr/bin/systemctl
+
+libvirt:
+  uri: qemu:///system
+  bridge: br0
+
+imageCache:
+  dataset: tank/nas-csi/images
+
+vmState:
+  dataset: tank/nas-csi/vms
+
+cluster:
+  name: nas-csi
+  distribution: k3s
+  profile: maintenance-basic
+  version: v1.33.0+k3s1
+  tokenFile: /etc/nas-csi/secrets/k3s-token
+  kubeconfigOut: /etc/nas-csi/kubeconfig
+  apiServer:
+    endpoint: https://nas-csi-api.example.test:6443
+    tlsSans:
+      - nas-csi-api.example.test
+  network:
+    clusterCidr: 10.42.0.0/16
+    serviceCidr: 10.43.0.0/16
+    clusterDns: 10.43.0.10
+    flannelBackend: vxlan
+  disable:
+    - traefik
+    - servicelb
+  addons:
+    nasCsi: true
+    metricsServer: true
+
+nodes:
+  - name: server-1
+    domain: nascsi-server-1
+    role: server
+    autostart: true
+    vcpus: 2
+    memoryMib: 4096
+    machine: q35
+    firmware: efi
+    cpu: host-passthrough
+    network:
+      bridge: br0
+      mac: "52:54:00:00:00:01"
+    rootDisk:
+      image: /mnt/tank/nas-csi/vms/nascsi-server-1.qcow2
+      sourceImage: /mnt/tank/nas-csi/images/debian-12-genericcloud-amd64.qcow2
+      sourceFormat: qcow2
+      sizeGib: 80
+      format: qcow2
+    k3s:
+      clusterInit: true
+      labels:
+        nas-csi.dev/storage-node: "true"
+    exports:
+      - repos
+      - samples
+
+  - name: agent-1
+    domain: nascsi-agent-1
+    role: agent
+    autostart: true
+    vcpus: 6
+    memoryMib: 16384
+    machine: q35
+    firmware: efi
+    cpu: host-passthrough
+    network:
+      bridge: br0
+      mac: "52:54:00:00:00:02"
+    rootDisk:
+      image: /mnt/tank/nas-csi/vms/nascsi-agent-1.qcow2
+      sourceImage: /mnt/tank/nas-csi/images/debian-12-genericcloud-amd64.qcow2
+      sourceFormat: qcow2
+      sizeGib: 120
+      format: qcow2
+    k3s:
+      server: https://nas-csi-api.example.test:6443
+      labels:
+        nas-csi.dev/storage-node: "true"
+    exports:
+      - repos
+      - samples
+
+exports:
+  repos:
+    dataset: tank/repos
+    sourcePath: /mnt/tank/repos
+    tag: nascsi_repos
+    policy: repos-dev
+    access: read-write
+  samples:
+    dataset: tank/samples
+    sourcePath: /mnt/tank/samples
+    tag: nascsi_samples
+    policy: samples-ro
+    access: read-only

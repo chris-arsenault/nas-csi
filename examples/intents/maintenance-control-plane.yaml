@@ -1,0 +1,22 @@
+apiVersion: nas-csi.dev/v1alpha1
+kind: ClusterIntent
+
+profile: maintenance-control-plane
+
+nodes:
+  servers: 3
+  agents: 0
+
+storagePolicies:
+  - name: repos-dev
+    access: read-write
+    workload: git-repositories
+  - name: samples-ro
+    access: read-only
+    workload: streaming-library
+
+addons:
+  nasCsi: true
+  metricsServer: true
+
+applications: []

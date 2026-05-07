@@ -1,0 +1,93 @@
+# nas-csi
+
+`nas-csi` is an experimental Kubernetes CSI project for exposing ordinary
+TrueNAS ZFS filesystem datasets to VM-based Kubernetes or K3s workloads.
+
+The target topology is intentionally narrow: one TrueNAS host, IaC-managed
+KVM/libvirt node VMs on that same host, a host-agent-owned k3s cluster inside
+those VMs, and TrueNAS filesystem datasets that may also remain SMB shares.
+
+## Motivation
+
+The useful data already lives in normal TrueNAS datasets. For this project,
+those datasets must keep working with:
+
+- TrueNAS ZFS snapshots, replication, quotas, and retention tooling;
+- TrueNAS SMB shares for LAN clients;
+- direct file management outside Kubernetes;
+- Kubernetes workloads that need better small-file and streaming behavior than
+  a conventional NFS mount can provide.
+
+That rules out treating the important datasets as opaque block volumes. Block
+CSI remains useful for app-private storage, but it does not satisfy the
+"same dataset, same files, still SMB-visible" requirement.
+
+## Major Features
+
+- TrueNAS-hosted node VM lifecycle planning through libvirt/QEMU.
+- Host-agent-managed virtiofs transport for selected filesystem datasets.
+- k3s bootstrap planning for server and agent node VMs.
+- CSI controller and node-plugin crates for the Kubernetes integration surface.
+- Repo-safe intent files plus target-host discovery and local materialization.
+- State-aware host reconciliation with `apply`, `skip`, and `refuse` decisions.
+- Rust-generated cloud-init NoCloud seed images, with no external ISO tooling.
+- Project-owned libvirt metadata hashes for stable managed-domain comparison.
+
+## Current Build Slice
+
+The repository currently implements the Rust workspace, typed config model,
+read-only discovery, host config materialization, VM artifact rendering,
+cloud-init seed generation, and dry-run host reconciliation.
+
+```bash
+cargo run -p nas-csi-host-agent -- validate-intent \
+  --intent examples/intents/maintenance-basic.yaml
+
+cargo run -p nas-csi-host-agent -- discover \
+  --output .nas-csi/discovery.yaml
+
+cargo run -p nas-csi-host-agent -- materialize \
+  --intent examples/intents/maintenance-basic.yaml \
+  --discovery examples/configs/discovery.sample.yaml \
+  --selections examples/configs/selections.sample.yaml \
+  --output .nas-csi/host.yaml
+
+cargo run -p nas-csi-host-agent -- render \
+  --config .nas-csi/host.yaml \
+  --output-dir .nas-csi/rendered
+
+cargo run -p nas-csi-host-agent -- apply \
+  --config .nas-csi/host.yaml \
+  --artifact-dir .nas-csi/rendered
+```
+
+Generated `.nas-csi` files are host-local state and ignored by git. `apply` is
+dry-run unless `--execute` is passed.
+
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Design overview](docs/design/README.md)
+- [Architecture](docs/design/architecture.md)
+- [VM management](docs/design/vm-management.md)
+- [Cluster management](docs/design/cluster-management.md)
+- [Configuration](docs/design/configuration.md)
+- [Discovery and onboarding](docs/design/discovery.md)
+- [Component structure](docs/design/component-structure.md)
+- [Project plan](docs/project/README.md)
+- [Implementation plan](docs/project/implementation-plan.md)
+- [Operational runbooks](docs/operations/README.md)
+- [Research notes](docs/research/README.md)
+- [Examples](examples/README.md)
+
+## Development
+
+Run the full local check:
+
+```bash
+cargo run -p nas-csi-xtask -- check
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and
+[CODEX.md](CODEX.md) for project-specific instructions for Codex-style coding
+agents.

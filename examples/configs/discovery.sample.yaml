@@ -1,0 +1,66 @@
+apiVersion: nas-csi.dev/v1alpha1
+kind: DiscoveryInventory
+generatedUnixSeconds: 1
+
+host:
+  osPrettyName: TrueNAS SCALE sample
+  architecture: x86_64
+  cpuCount: 16
+  memoryTotalKib: 67108864
+
+truenas:
+  localApiUrl: wss://127.0.0.1/api/current
+  version: sample
+  pools:
+    - name: tank
+  filesystemDatasets:
+    - name: tank/repos
+      mountpoint: /mnt/tank/repos
+    - name: tank/samples
+      mountpoint: /mnt/tank/samples
+    - name: tank/nas-csi/images
+      mountpoint: /mnt/tank/nas-csi/images
+    - name: tank/nas-csi/vms
+      mountpoint: /mnt/tank/nas-csi/vms
+  smbShares:
+    - name: repos
+      path: /mnt/tank/repos
+    - name: samples
+      path: /mnt/tank/samples
+
+libvirt:
+  uri: qemu:///system
+  virsh:
+    path: /usr/bin/virsh
+    version: virsh sample
+  qemu:
+    path: /usr/bin/qemu-system-x86_64
+    version: qemu sample
+  defaultMachine: q35
+
+network:
+  bridges:
+    - name: br0
+      interfaces:
+        - eno1
+  lanAddresses: []
+
+tools:
+  virtiofsd:
+    path: /usr/libexec/virtiofsd
+    version: virtiofsd sample
+  qemuImg:
+    path: /usr/bin/qemu-img
+    version: qemu-img sample
+  systemctl:
+    path: /usr/bin/systemctl
+    version: systemd sample
+  midclt:
+    path: /usr/bin/midclt
+    version: midclt sample
+
+existingProjectState:
+  configPaths: []
+  libvirtDomains: []
+
+warnings: []

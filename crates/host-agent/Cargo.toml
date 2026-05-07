@@ -1,0 +1,18 @@
+[package]
+name = "nas-csi-host-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+nas-csi-cluster-manager = { path = "../cluster-manager" }
+nas-csi-discovery = { path = "../discovery" }
+nas-csi-types.workspace = true
+nas-csi-vm-manager = { path = "../vm-manager" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yml.workspace = true

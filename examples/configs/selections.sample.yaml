@@ -1,0 +1,48 @@
+apiVersion: nas-csi.dev/v1alpha1
+kind: HostSelections
+
+truenas:
+  apiKeyFile: /etc/nas-csi/secrets/truenas-api-key
+
+libvirt:
+  bridge: br0
+
+image:
+  source: /mnt/tank/nas-csi/images/debian-12-genericcloud-amd64.qcow2
+
+datasets:
+  imageCache: tank/nas-csi/images
+  vmState: tank/nas-csi/vms
+
+cluster:
+  name: nas-csi
+  version: v1.33.0+k3s1
+  apiEndpoint: https://nas-csi-api.example.test:6443
+  tokenFile: /etc/nas-csi/secrets/k3s-token
+  kubeconfigOut: /etc/nas-csi/kubeconfig
+  tlsSans:
+    - nas-csi-api.example.test
+  disable:
+    - traefik
+    - servicelb
+  network:
+    clusterCidr: 10.42.0.0/16
+    serviceCidr: 10.43.0.0/16
+    clusterDns: 10.43.0.10
+    flannelBackend: vxlan
+
+nodeDefaults:
+  server:
+    vcpus: 2
+    memoryMib: 4096
+    rootDiskSizeGib: 80
+  agent:
+    vcpus: 6
+    memoryMib: 16384
+    rootDiskSizeGib: 120
+
+exports:
+  repos-dev:
+    dataset: tank/repos
+  samples-ro:
+    dataset: tank/samples

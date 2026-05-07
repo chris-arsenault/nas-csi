@@ -1,0 +1,14 @@
+# Rust
+/target/
+
+# Python
+__pycache__/
+*.pyc
+
+# Host-local nas-csi state
+/.nas-csi/
+/local/
+*.local.yaml
+host.yaml
+discovery.yaml
+kubeconfig
