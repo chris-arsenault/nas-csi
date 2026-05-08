@@ -158,6 +158,91 @@ where
     pub fn sharing_smb_query(&mut self) -> Result<Vec<SmbShareRecord>, ClientError> {
         self.call("sharing.smb.query", Some(json!([])))
     }
+
+    pub fn pool_dataset_create(&mut self, name: &str) -> Result<Value, ClientError> {
+        self.call(
+            "pool.dataset.create",
+            Some(json!([{
+                "name": name,
+                "type": "FILESYSTEM"
+            }])),
+        )
+    }
+
+    pub fn pool_dataset_update_properties(
+        &mut self,
+        id: &str,
+        properties: Value,
+    ) -> Result<Value, ClientError> {
+        self.call("pool.dataset.update", Some(json!([id, properties])))
+    }
+
+    pub fn pool_dataset_delete(&mut self, id: &str, recursive: bool) -> Result<bool, ClientError> {
+        self.call(
+            "pool.dataset.delete",
+            Some(json!([id, { "recursive": recursive }])),
+        )
+    }
+
+    pub fn pool_snapshot_query(&mut self) -> Result<Vec<SnapshotRecord>, ClientError> {
+        self.call("pool.snapshot.query", Some(json!([])))
+    }
+
+    pub fn pool_snapshot_create(
+        &mut self,
+        dataset: &str,
+        name: &str,
+        recursive: bool,
+    ) -> Result<SnapshotRecord, ClientError> {
+        self.call(
+            "pool.snapshot.create",
+            Some(json!([{
+                "dataset": dataset,
+                "name": name,
+                "recursive": recursive
+            }])),
+        )
+    }
+
+    pub fn pool_snapshot_delete(&mut self, id: &str) -> Result<bool, ClientError> {
+        self.call("pool.snapshot.delete", Some(json!([id])))
+    }
+
+    pub fn sharing_smb_create(
+        &mut self,
+        name: &str,
+        path: &str,
+        enabled: bool,
+    ) -> Result<SmbShareRecord, ClientError> {
+        self.call(
+            "sharing.smb.create",
+            Some(json!([{
+                "name": name,
+                "path": path,
+                "enabled": enabled
+            }])),
+        )
+    }
+
+    pub fn sharing_smb_update(
+        &mut self,
+        id: u64,
+        name: Option<&str>,
+        path: Option<&str>,
+        enabled: Option<bool>,
+    ) -> Result<SmbShareRecord, ClientError> {
+        let mut patch = serde_json::Map::new();
+        if let Some(name) = name {
+            patch.insert("name".to_string(), json!(name));
+        }
+        if let Some(path) = path {
+            patch.insert("path".to_string(), json!(path));
+        }
+        if let Some(enabled) = enabled {
+            patch.insert("enabled".to_string(), json!(enabled));
+        }
+        self.call("sharing.smb.update", Some(json!([id, patch])))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,6 +298,16 @@ pub struct SmbShareRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct SnapshotRecord {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub dataset: Option<String>,
+    #[serde(default)]
+    pub created: Option<ValueField<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct ValueField<T> {
     pub value: T,
 }
@@ -238,6 +333,67 @@ pub mod methods {
 
     pub fn sharing_smb_query(id: u64) -> JsonRpcRequest {
         JsonRpcRequest::new(id, "sharing.smb.query", Some(json!([])))
+    }
+
+    pub fn pool_dataset_create(id: u64, name: &str) -> JsonRpcRequest {
+        JsonRpcRequest::new(
+            id,
+            "pool.dataset.create",
+            Some(json!([{ "name": name, "type": "FILESYSTEM" }])),
+        )
+    }
+
+    pub fn pool_dataset_update_properties(
+        id: u64,
+        dataset: &str,
+        properties: Value,
+    ) -> JsonRpcRequest {
+        JsonRpcRequest::new(
+            id,
+            "pool.dataset.update",
+            Some(json!([dataset, properties])),
+        )
+    }
+
+    pub fn pool_dataset_delete(id: u64, dataset: &str, recursive: bool) -> JsonRpcRequest {
+        JsonRpcRequest::new(
+            id,
+            "pool.dataset.delete",
+            Some(json!([dataset, { "recursive": recursive }])),
+        )
+    }
+
+    pub fn pool_snapshot_query(id: u64) -> JsonRpcRequest {
+        JsonRpcRequest::new(id, "pool.snapshot.query", Some(json!([])))
+    }
+
+    pub fn pool_snapshot_create(
+        id: u64,
+        dataset: &str,
+        name: &str,
+        recursive: bool,
+    ) -> JsonRpcRequest {
+        JsonRpcRequest::new(
+            id,
+            "pool.snapshot.create",
+            Some(json!([{ "dataset": dataset, "name": name, "recursive": recursive }])),
+        )
+    }
+
+    pub fn pool_snapshot_delete(id: u64, snapshot_id: &str) -> JsonRpcRequest {
+        JsonRpcRequest::new(id, "pool.snapshot.delete", Some(json!([snapshot_id])))
+    }
+
+    pub fn sharing_smb_create(id: u64, name: &str, path: &str, enabled: bool) -> JsonRpcRequest {
+        JsonRpcRequest::new(
+            id,
+            "sharing.smb.create",
+            Some(json!([{ "name": name, "path": path, "enabled": enabled }])),
+        )
+    }
+
+    pub fn sharing_smb_update(id: u64, share_id: u64, patch: Value) -> JsonRpcRequest {
+        JsonRpcRequest::new(id, "sharing.smb.update", Some(json!([share_id, patch])))
     }
 }
 
@@ -321,6 +477,69 @@ mod tests {
         assert_eq!(result[0].name, "pool/data");
         assert_eq!(result[0].kind_value(), Some("FILESYSTEM"));
         assert_eq!(result[0].mountpoint_value(), Some("/mnt/pool/data"));
+    }
+
+    #[test]
+    fn builds_dataset_snapshot_and_smb_requests() {
+        assert_eq!(
+            serialize_request(&methods::pool_dataset_create(1, "tank/repos")).expect("dataset"),
+            r#"{"jsonrpc":"2.0","id":1,"method":"pool.dataset.create","params":[{"name":"tank/repos","type":"FILESYSTEM"}]}"#
+        );
+        assert_eq!(
+            serialize_request(&methods::pool_snapshot_create(
+                2,
+                "tank/repos",
+                "nas-csi-manual",
+                false
+            ))
+            .expect("snapshot"),
+            r#"{"jsonrpc":"2.0","id":2,"method":"pool.snapshot.create","params":[{"dataset":"tank/repos","name":"nas-csi-manual","recursive":false}]}"#
+        );
+        assert_eq!(
+            serialize_request(&methods::sharing_smb_create(
+                3,
+                "repos",
+                "/mnt/tank/repos",
+                true
+            ))
+            .expect("smb"),
+            r#"{"jsonrpc":"2.0","id":3,"method":"sharing.smb.create","params":[{"enabled":true,"name":"repos","path":"/mnt/tank/repos"}]}"#
+        );
+    }
+
+    #[test]
+    fn client_exposes_mutating_dataset_snapshot_and_smb_calls() {
+        let transport = FakeTransport::new(vec![
+            r#"{"jsonrpc":"2.0","id":1,"result":{"id":"tank/scratch"}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"result":{"id":"tank/scratch@manual","name":"manual","dataset":"tank/scratch"}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"result":{"id":7,"name":"scratch","path":"/mnt/tank/scratch","enabled":true}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"result":true}"#,
+        ]);
+        let mut client = JsonRpcClient::new(transport);
+
+        let dataset = client
+            .pool_dataset_create("tank/scratch")
+            .expect("create dataset");
+        let snapshot = client
+            .pool_snapshot_create("tank/scratch", "manual", false)
+            .expect("create snapshot");
+        let share = client
+            .sharing_smb_create("scratch", "/mnt/tank/scratch", true)
+            .expect("create share");
+        assert!(
+            client
+                .pool_dataset_delete("tank/scratch", false)
+                .expect("delete dataset")
+        );
+
+        assert_eq!(dataset, json!({"id": "tank/scratch"}));
+        assert_eq!(snapshot.id, "tank/scratch@manual");
+        assert_eq!(share.id, 7);
+        let transport = client.into_inner();
+        assert!(transport.sent[0].contains("pool.dataset.create"));
+        assert!(transport.sent[1].contains("pool.snapshot.create"));
+        assert!(transport.sent[2].contains("sharing.smb.create"));
+        assert!(transport.sent[3].contains("pool.dataset.delete"));
     }
 
     struct FakeTransport {

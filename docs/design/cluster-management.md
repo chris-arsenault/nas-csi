@@ -238,6 +238,20 @@ The cluster manager should be state-aware:
 - If k3s version changes, perform ordered upgrades.
 - If the CSI chart changed, reconcile it after the API is healthy.
 
+The current implementation exposes this through:
+
+```sh
+nas-csi-host-agent cluster plan --config /etc/nas-csi/host.yaml
+nas-csi-host-agent cluster apply --config /etc/nas-csi/host.yaml --execute
+nas-csi-host-agent cluster status --config /etc/nas-csi/host.yaml
+```
+
+`cluster apply` expects the VM/runtime substrate to have already been rendered
+and reconciled by host `apply`. It then generates the token if missing, starts
+the first server, waits for guest k3s, retrieves kubeconfig through the QEMU
+guest agent, starts join nodes, reconciles node labels/taints, and applies
+substrate manifests from the configured manifest root.
+
 For v1, prefer explicit commands:
 
 - `plan`

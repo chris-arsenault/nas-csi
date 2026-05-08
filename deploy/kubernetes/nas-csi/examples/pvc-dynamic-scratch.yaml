@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: scratch-dynamic
+  namespace: default
+  annotations:
+    nas-csi.dev/dataset: tank/k8s/scratch-dynamic
+spec:
+  storageClassName: nas-csi-dynamic-retain
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi

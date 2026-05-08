@@ -28,6 +28,10 @@ CSI remains useful for app-private storage, but it does not satisfy the
 - Host-agent-managed virtiofs transport for selected filesystem datasets.
 - k3s bootstrap planning for server and agent node VMs.
 - CSI controller and node-plugin crates for the Kubernetes integration surface.
+- Host-agent-owned k3s cluster reconciliation for bootstrap, join, kubeconfig,
+  node readiness, labels/taints, and substrate manifests.
+- Generated CSI protobuf bindings and Rust gRPC services for controller and
+  node paths.
 - Repo-safe intent files plus target-host discovery and local materialization.
 - State-aware host reconciliation with `apply`, `skip`, and `refuse` decisions.
 - Rust-generated cloud-init NoCloud seed images, with no external ISO tooling.
@@ -39,8 +43,9 @@ CSI remains useful for app-private storage, but it does not satisfy the
 
 The repository currently implements the Rust workspace, typed config model,
 read-only discovery, host config materialization, VM artifact rendering,
-cloud-init seed generation, state-aware host reconciliation, and an early
-guarded `apply --execute` path for VM/runtime substrate changes.
+cloud-init seed generation, state-aware host reconciliation, cluster substrate
+reconciliation, and guarded execute paths for VM/runtime and k3s substrate
+changes.
 
 ```bash
 cargo run -p nas-csi-host-agent -- validate-intent \
@@ -68,6 +73,11 @@ cargo run -p nas-csi-host-agent -- status \
 
 cargo run -p nas-csi-host-agent -- health \
   --config .nas-csi/host.yaml
+
+cargo run -p nas-csi-host-agent -- cluster plan \
+  --config .nas-csi/host.yaml \
+  --artifact-dir .nas-csi/rendered \
+  --manifest-root deploy
 ```
 
 Generated `.nas-csi` files are host-local state and ignored by git. `apply` is
@@ -75,6 +85,12 @@ dry-run unless `--execute` is passed. Execute refuses unsafe plans, validates
 base image existence/format/SHA-256 before root disk creation, grows but never
 shrinks root disks, waits for managed virtiofs sockets, and refuses to manage
 unmarked libvirt domains unless adoption is explicitly enabled.
+
+`cluster apply --execute` is the follow-on substrate path. It generates the k3s
+token if needed, starts the first server, retrieves and rewrites kubeconfig,
+starts joining nodes, waits for readiness, reconciles labels and taints, and
+applies configured substrate manifests. It does not deploy user application
+workloads.
 
 Build a TrueNAS host install directory with:
 

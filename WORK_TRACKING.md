@@ -48,36 +48,36 @@ slice. Verification work is intentionally excluded here.
 
 ## 4. Cluster / CSI
 
-1. [ ] Implement k3s first-server bootstrap orchestration after VM creation.
-2. [ ] Implement k3s agent/server join orchestration for additional nodes.
-3. [ ] Manage the k3s cluster token lifecycle.
-4. [ ] Retrieve kubeconfig from the initialized cluster.
-5. [ ] Store kubeconfig at the configured host-local path with safe permissions.
-6. [ ] Add cluster API readiness checks.
-7. [ ] Add node readiness checks.
-8. [ ] Add node label and taint reconciliation.
-9. [ ] Add cluster add-on reconciliation for substrate components.
-10. [ ] Install or reconcile the `nas-csi` Kubernetes manifests or Helm chart.
-11. [ ] Generate CSI protobuf bindings from the upstream CSI spec.
-12. [ ] Implement CSI controller service bootstrap.
-13. [ ] Implement `CreateVolume` for existing TrueNAS filesystem datasets.
-14. [ ] Implement optional `CreateVolume` dataset creation through the TrueNAS
+1. [x] Implement k3s first-server bootstrap orchestration after VM creation.
+2. [x] Implement k3s agent/server join orchestration for additional nodes.
+3. [x] Manage the k3s cluster token lifecycle.
+4. [x] Retrieve kubeconfig from the initialized cluster.
+5. [x] Store kubeconfig at the configured host-local path with safe permissions.
+6. [x] Add cluster API readiness checks.
+7. [x] Add node readiness checks.
+8. [x] Add node label and taint reconciliation.
+9. [x] Add cluster add-on reconciliation for substrate components.
+10. [x] Install or reconcile the `nas-csi` Kubernetes manifests or Helm chart.
+11. [x] Generate CSI protobuf bindings from the upstream CSI spec.
+12. [x] Implement CSI controller service bootstrap.
+13. [x] Implement `CreateVolume` for existing TrueNAS filesystem datasets.
+14. [x] Implement optional `CreateVolume` dataset creation through the TrueNAS
    API.
-15. [ ] Implement `DeleteVolume` safety semantics that never delete
+15. [x] Implement `DeleteVolume` safety semantics that never delete
    authoritative datasets unless explicitly enabled.
-16. [ ] Implement `ControllerPublishVolume` and `ControllerUnpublishVolume`
+16. [x] Implement `ControllerPublishVolume` and `ControllerUnpublishVolume`
    semantics for node/export assignment.
-17. [ ] Implement `ValidateVolumeCapabilities` for supported filesystem modes.
-18. [ ] Implement `ListVolumes`, `GetCapacity`, and controller identity calls.
-19. [ ] Implement SMB share metadata discovery and optional management.
-20. [ ] Implement snapshot discovery and snapshot lifecycle API integration.
-21. [ ] Implement retention/replication metadata integration where needed.
-22. [ ] Implement CSI node plugin gRPC server.
-23. [ ] Implement node-side runtime config loading from `/etc/nas-csi/node.yaml`.
-24. [ ] Implement `NodeStageVolume` using the virtiofs-mounted source path.
-25. [ ] Implement `NodePublishVolume` bind mounts into pod target paths.
-26. [ ] Implement `NodeUnpublishVolume` and `NodeUnstageVolume`.
-27. [ ] Implement node-side mount validation and fail-closed behavior.
-28. [ ] Add Kubernetes controller Deployment manifests.
-29. [ ] Add Kubernetes node DaemonSet manifests.
-30. [ ] Add RBAC, CSIDriver, StorageClass, and example PVC manifests.
+17. [x] Implement `ValidateVolumeCapabilities` for supported filesystem modes.
+18. [x] Implement `ListVolumes`, `GetCapacity`, and controller identity calls.
+19. [x] Implement SMB share metadata discovery and optional management.
+20. [x] Implement snapshot discovery and snapshot lifecycle API integration.
+21. [x] Implement retention/replication metadata integration where needed.
+22. [x] Implement CSI node plugin gRPC server.
+23. [x] Implement node-side runtime config loading from `/etc/nas-csi/node.yaml`.
+24. [x] Implement `NodeStageVolume` using the virtiofs-mounted source path.
+25. [x] Implement `NodePublishVolume` bind mounts into pod target paths.
+26. [x] Implement `NodeUnpublishVolume` and `NodeUnstageVolume`.
+27. [x] Implement node-side mount validation and fail-closed behavior.
+28. [x] Add Kubernetes controller Deployment manifests.
+29. [x] Add Kubernetes node DaemonSet manifests.
+30. [x] Add RBAC, CSIDriver, StorageClass, and example PVC manifests.

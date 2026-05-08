@@ -24,6 +24,20 @@ process are still early.
   growth, virtiofs socket readiness, and libvirt domain ownership/adoption.
 - Host-agent systemd packaging, install/uninstall scripts, structured logs, and
   health output for tools, units, domains, sockets, and mounted datasets.
+- Host-agent cluster reconciliation for k3s token creation, ordered server and
+  join-node startup, kubeconfig retrieval, API/node readiness, node labels and
+  taints, and substrate manifest apply markers.
+- Generated CSI protobuf bindings plus controller and node gRPC service
+  implementations.
+- CSI controller semantics for existing TrueNAS filesystem datasets, optional
+  dynamic dataset creation hooks, delete safety, publish assignments,
+  capability validation, volume listing, capacity, identity, SMB metadata,
+  snapshots, and retention/replication metadata.
+- CSI node plugin runtime config loading, virtiofs staging validation,
+  bind-mount publish, idempotent unpublish/unstage, and Unix-socket service
+  bootstrap.
+- Kubernetes manifests for the `nas-csi` controller Deployment, node DaemonSet,
+  RBAC, CSIDriver, StorageClasses, metrics-server, and example PV/PVCs.
 - Discovered host tool paths in generated `HostConfig.hostTools`.
 - Initial documentation set covering architecture, VM ownership, k3s lifecycle,
   discovery, configuration, research, and operational runbooks.

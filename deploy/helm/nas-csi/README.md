@@ -1,6 +1,9 @@
 # deploy/helm/nas-csi
 
-Helm chart for Kubernetes-side deployment.
+Placeholder for a future Helm chart for Kubernetes-side deployment.
+
+The current installable substrate manifest is
+[`../../kubernetes/nas-csi/nas-csi.yaml`](../../kubernetes/nas-csi/nas-csi.yaml).
 
 Planned resources:
 

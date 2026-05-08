@@ -7,5 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nas-csi-proto = { path = "../csi-proto" }
 nas-csi-types.workspace = true
 serde_yml.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true

@@ -1,0 +1,275 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nas-csi-controller
+  namespace: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nas-csi-node
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nas-csi-controller
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
+      - persistentvolumeclaims
+      - nodes
+      - pods
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+      - volumeattachments
+      - csinodes
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+      - volumesnapshotcontents
+      - volumesnapshotclasses
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nas-csi-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nas-csi-controller
+subjects:
+  - kind: ServiceAccount
+    name: nas-csi-controller
+    namespace: kube-system
+---
+apiVersion: storage.k8s.io/v1
+kind: CSIDriver
+metadata:
+  name: nas-csi.dev
+spec:
+  attachRequired: false
+  podInfoOnMount: false
+  fsGroupPolicy: File
+  volumeLifecycleModes:
+    - Persistent
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nas-csi-existing
+provisioner: nas-csi.dev
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+allowVolumeExpansion: false
+parameters:
+  nas-csi.dev/mode: existing-dataset
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nas-csi-dynamic-retain
+provisioner: nas-csi.dev
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+allowVolumeExpansion: false
+parameters:
+  nas-csi.dev/mode: dynamic-filesystem-dataset
+  nas-csi.dev/deleteDatasetOnDelete: "false"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nas-csi-controller
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: nas-csi
+    app.kubernetes.io/component: controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nas-csi
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nas-csi
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: nas-csi-controller
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.3.0
+          args:
+            - --csi-address=$(ADDRESS)
+            - --feature-gates=Topology=true
+            - --extra-create-metadata
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-snapshotter
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v8.4.0
+          args:
+            - --csi-address=$(ADDRESS)
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.16.0
+          args:
+            - --csi-address=/csi/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: nas-csi-controller
+          image: ghcr.io/chris-arsenault/nas-csi-controller:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --endpoint=/csi/csi.sock
+            - --config=/etc/nas-csi/controller.yaml
+          ports:
+            - name: healthz
+              containerPort: 9808
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: config
+              mountPath: /etc/nas-csi
+              readOnly: true
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: nas-csi-controller
+            optional: true
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nas-csi-node
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: nas-csi
+    app.kubernetes.io/component: node
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nas-csi
+      app.kubernetes.io/component: node
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nas-csi
+        app.kubernetes.io/component: node
+    spec:
+      serviceAccountName: nas-csi-node
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: node-driver-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/nas-csi.dev/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: liveness-probe
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.16.0
+          args:
+            - --csi-address=/csi/csi.sock
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+        - name: nas-csi-node
+          image: ghcr.io/chris-arsenault/nas-csi-node:0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          args:
+            - --endpoint=/csi/csi.sock
+            - --config=/etc/nas-csi/node.yaml
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: pods-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: plugins-dir
+              mountPath: /var/lib/kubelet/plugins
+              mountPropagation: Bidirectional
+            - name: node-config
+              mountPath: /etc/nas-csi/node.yaml
+              readOnly: true
+            - name: virtiofs
+              mountPath: /var/lib/nas-csi/virtiofs
+              readOnly: true
+              mountPropagation: HostToContainer
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/nas-csi.dev
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: DirectoryOrCreate
+        - name: pods-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+            type: Directory
+        - name: plugins-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins
+            type: DirectoryOrCreate
+        - name: node-config
+          hostPath:
+            path: /etc/nas-csi/node.yaml
+            type: File
+        - name: virtiofs
+          hostPath:
+            path: /var/lib/nas-csi/virtiofs
+            type: Directory

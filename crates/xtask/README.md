@@ -21,6 +21,8 @@ example YAML validation.
 - `install.sh`
 - `uninstall.sh`
 - `README.md`
+- `deploy/addons`
+- `deploy/kubernetes`
 
 Planned commands:
 

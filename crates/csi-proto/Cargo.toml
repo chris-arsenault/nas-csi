@@ -1,5 +1,5 @@
 [package]
-name = "nas-csi-driver"
+name = "nas-csi-proto"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,8 +7,10 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-nas-csi-proto = { path = "../csi-proto" }
-nas-csi-types.workspace = true
-tokio.workspace = true
-tokio-stream.workspace = true
+prost.workspace = true
 tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+protoc-bin-vendored.workspace = true
+tonic-prost-build.workspace = true

@@ -11,6 +11,8 @@ Responsibilities:
 - Bind-mount staged paths into pod targets.
 - Enforce read-only publishes.
 - Clean up idempotently after pod and node plugin restarts.
+- Serve generated CSI Node and Identity services over the kubelet plugin Unix
+  socket.
 
 Important rules:
 

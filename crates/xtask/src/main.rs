@@ -88,12 +88,45 @@ fn package_host_agent() -> Result<(), String> {
         )
         .map_err(|error| format!("failed to copy {file}: {error}"))?;
     }
+    copy_dir(
+        &root.join("deploy/addons"),
+        &package_dir.join("deploy/addons"),
+    )?;
+    copy_dir(
+        &root.join("deploy/kubernetes"),
+        &package_dir.join("deploy/kubernetes"),
+    )?;
 
     set_executable(package_dir.join("bin/nas-csi-host-agent"))?;
     set_executable(package_dir.join("install.sh"))?;
     set_executable(package_dir.join("uninstall.sh"))?;
 
     println!("packaged host agent under {}", package_dir.display());
+    Ok(())
+}
+
+fn copy_dir(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("failed to create {}: {error}", destination.display()))?;
+    for entry in fs::read_dir(source)
+        .map_err(|error| format!("failed to read {}: {error}", source.display()))?
+    {
+        let entry =
+            entry.map_err(|error| format!("failed to read {} entry: {error}", source.display()))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_dir(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                format!(
+                    "failed to copy {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        }
+    }
     Ok(())
 }
 

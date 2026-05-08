@@ -7,10 +7,11 @@ Responsibilities:
 - Render k3s server and agent configuration.
 - Generate cluster bootstrap cloud-init fragments.
 - Manage cluster token and kubeconfig state.
-- Bootstrap the first server.
-- Join additional server and agent nodes.
-- Wait for Kubernetes API and node readiness.
-- Reconcile substrate add-ons, including `nas-csi`.
+- Plan ordered first-server startup after VM creation.
+- Plan additional server and agent joins.
+- Wait for guest k3s, Kubernetes API, and node readiness.
+- Reconcile node labels and taints.
+- Reconcile substrate add-ons, including `nas-csi`, with manifest hash markers.
 - Drain, cordon, uncordon, restart, and rebuild nodes for maintenance.
 - Plan controlled k3s upgrades.
 

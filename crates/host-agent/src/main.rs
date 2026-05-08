@@ -1,15 +1,22 @@
 use anyhow::{Context, Result};
+use base64::Engine;
 use clap::{Parser, Subcommand};
+use nas_csi_cluster_manager::{
+    ClusterActualState, ClusterCommandSpec, ClusterNodeActualState, ClusterOperation,
+    ClusterReconcileOptions, ClusterReconcilePlan, ClusterReconcileStepKind, DesiredManifest,
+    GuestCommandSpec,
+};
 use nas_csi_types::{
-    ClusterIntent, DiscoveryInventory, HostConfig, HostConfigDraft, HostSelections,
+    ClusterIntent, DiscoveryInventory, HostConfig, HostConfigDraft, HostSelections, NodeRole,
+    NodeTaint,
 };
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::Command as ProcessCommand;
@@ -102,6 +109,50 @@ enum Command {
         systemd_unit_dir: PathBuf,
         #[arg(long)]
         json: bool,
+    },
+    /// Plan, apply, or inspect host-agent-owned k3s cluster substrate.
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClusterCommand {
+    /// Plan k3s bootstrap/join and Kubernetes substrate reconciliation.
+    Plan {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = ".nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "deploy")]
+        manifest_root: PathBuf,
+        #[arg(long, default_value = "kubectl")]
+        kubectl: String,
+    },
+    /// Apply k3s bootstrap/join and Kubernetes substrate reconciliation.
+    Apply {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = ".nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "deploy")]
+        manifest_root: PathBuf,
+        #[arg(long, default_value = "kubectl")]
+        kubectl: String,
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Report cluster-side state observed through libvirt, guest agent, and kubectl.
+    Status {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = ".nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "deploy")]
+        manifest_root: PathBuf,
+        #[arg(long, default_value = "kubectl")]
+        kubectl: String,
     },
 }
 
@@ -256,7 +307,751 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Cluster { command } => match command {
+            ClusterCommand::Plan {
+                config,
+                artifact_dir,
+                manifest_root,
+                kubectl,
+            } => {
+                let config = load_yaml::<HostConfig>(&config)?;
+                report_validation("host config", config.validate())?;
+                let runner = RealCommandRunner;
+                let options = cluster_options_from_config(&config, &artifact_dir, &kubectl);
+                let manifests = load_cluster_manifests(&config, &manifest_root)?;
+                let actual = inspect_cluster_actual_state(&config, &options, &manifests, &runner)?;
+                let plan = nas_csi_cluster_manager::plan_cluster_reconcile(
+                    &config, &options, &actual, &manifests,
+                );
+                print_cluster_reconcile_plan(&plan);
+                Ok(())
+            }
+            ClusterCommand::Apply {
+                config,
+                artifact_dir,
+                manifest_root,
+                kubectl,
+                execute,
+            } => {
+                let config = load_yaml::<HostConfig>(&config)?;
+                report_validation("host config", config.validate())?;
+                let runner = RealCommandRunner;
+                let options = cluster_options_from_config(&config, &artifact_dir, &kubectl);
+                let manifests = load_cluster_manifests(&config, &manifest_root)?;
+                let actual = inspect_cluster_actual_state(&config, &options, &manifests, &runner)?;
+                let plan = nas_csi_cluster_manager::plan_cluster_reconcile(
+                    &config, &options, &actual, &manifests,
+                );
+                if execute {
+                    execute_cluster_reconcile_plan(&plan, &options, &runner)
+                } else {
+                    print_cluster_reconcile_plan(&plan);
+                    Ok(())
+                }
+            }
+            ClusterCommand::Status {
+                config,
+                artifact_dir,
+                manifest_root,
+                kubectl,
+            } => {
+                let config = load_yaml::<HostConfig>(&config)?;
+                report_validation("host config", config.validate())?;
+                let runner = RealCommandRunner;
+                let options = cluster_options_from_config(&config, &artifact_dir, &kubectl);
+                let manifests = load_cluster_manifests(&config, &manifest_root)?;
+                let actual = inspect_cluster_actual_state(&config, &options, &manifests, &runner)?;
+                print_cluster_status(&config, &actual, &manifests);
+                Ok(())
+            }
+        },
     }
+}
+
+fn cluster_options_from_config(
+    config: &HostConfig,
+    artifact_dir: &Path,
+    kubectl_path: &str,
+) -> ClusterReconcileOptions {
+    ClusterReconcileOptions {
+        kubectl_path: kubectl_path.to_string(),
+        virsh_path: config.host_tools.virsh.clone(),
+        libvirt_uri: config.libvirt.uri.clone(),
+        artifact_dir: artifact_dir.display().to_string(),
+        ..ClusterReconcileOptions::default()
+    }
+}
+
+fn load_cluster_manifests(
+    config: &HostConfig,
+    manifest_root: &Path,
+) -> Result<Vec<DesiredManifest>> {
+    let mut manifests = Vec::new();
+    if config.cluster.addons.metrics_server {
+        manifests.push(load_desired_manifest(
+            "metrics-server",
+            &manifest_root
+                .join("addons")
+                .join("metrics-server")
+                .join("metrics-server.yaml"),
+        )?);
+    }
+    if config.cluster.addons.nas_csi {
+        manifests.push(load_desired_manifest(
+            "nas-csi",
+            &manifest_root
+                .join("kubernetes")
+                .join("nas-csi")
+                .join("nas-csi.yaml"),
+        )?);
+    }
+    Ok(manifests)
+}
+
+fn load_desired_manifest(name: &str, path: &Path) -> Result<DesiredManifest> {
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("failed to read manifest {}", path.display()))?;
+    Ok(DesiredManifest {
+        name: name.to_string(),
+        path: path.display().to_string(),
+        contents,
+    })
+}
+
+fn inspect_cluster_actual_state(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    manifests: &[DesiredManifest],
+    runner: &impl CommandRunner,
+) -> Result<ClusterActualState> {
+    let token_present = fs::read_to_string(&config.cluster.token_file)
+        .map(|token| nas_csi_cluster_manager::token_looks_valid(&token))
+        .unwrap_or(false);
+    let kubeconfig_present = Path::new(&config.cluster.kubeconfig_out).is_file();
+    let api_ready = kubeconfig_present
+        && command_success(
+            runner,
+            &options.kubectl_path,
+            [
+                "--kubeconfig",
+                config.cluster.kubeconfig_out.as_str(),
+                "get",
+                "--raw=/readyz",
+            ],
+        )
+        .unwrap_or(false);
+
+    let mut nodes = BTreeMap::new();
+    let kubernetes_nodes = if api_ready {
+        inspect_kubernetes_nodes(config, options, runner)?
+    } else {
+        BTreeMap::new()
+    };
+
+    for node in &config.nodes {
+        let domain_state = inspect_domain(
+            runner,
+            &options.virsh_path,
+            &options.libvirt_uri,
+            &node.domain,
+        )
+        .unwrap_or(nas_csi_vm_manager::DomainActualState {
+            exists: false,
+            managed: false,
+            active: false,
+            autostart: None,
+            desired_hash: None,
+            xml: None,
+            xml_hash: None,
+        });
+        let domain_running = domain_state.active;
+        let k3s_ready = if domain_running {
+            let service_name = match node.role {
+                NodeRole::Server => "k3s",
+                NodeRole::Agent => "k3s-agent",
+            };
+            guest_command_success(
+                runner,
+                options,
+                &node.domain,
+                &GuestCommandSpec::new(
+                    "/bin/systemctl".to_string(),
+                    [
+                        "is-active".to_string(),
+                        "--quiet".to_string(),
+                        service_name.to_string(),
+                    ],
+                ),
+            )
+            .unwrap_or(false)
+        } else {
+            false
+        };
+        let kubernetes = kubernetes_nodes
+            .get(&node.name)
+            .cloned()
+            .unwrap_or_default();
+        nodes.insert(
+            node.name.clone(),
+            ClusterNodeActualState {
+                domain_running,
+                k3s_ready,
+                kubernetes_ready: kubernetes.ready,
+                labels: kubernetes.labels,
+                taints: kubernetes.taints,
+            },
+        );
+    }
+
+    let mut applied_manifests = BTreeMap::new();
+    for manifest in manifests {
+        let marker_path = nas_csi_cluster_manager::manifest_marker_path(options, &manifest.name);
+        if let Ok(hash) = fs::read_to_string(&marker_path) {
+            applied_manifests.insert(manifest.name.clone(), hash.trim().to_string());
+        }
+    }
+
+    Ok(ClusterActualState {
+        token_present,
+        kubeconfig_present,
+        api_ready,
+        nodes,
+        applied_manifests,
+    })
+}
+
+#[derive(Clone, Debug, Default)]
+struct KubernetesNodeActual {
+    ready: bool,
+    labels: BTreeMap<String, String>,
+    taints: Vec<NodeTaint>,
+}
+
+#[derive(serde::Deserialize)]
+struct KubernetesNodeList {
+    #[serde(default)]
+    items: Vec<KubernetesNode>,
+}
+
+#[derive(serde::Deserialize)]
+struct KubernetesNode {
+    metadata: KubernetesMetadata,
+    #[serde(default)]
+    spec: KubernetesNodeSpec,
+    #[serde(default)]
+    status: KubernetesNodeStatus,
+}
+
+#[derive(serde::Deserialize)]
+struct KubernetesMetadata {
+    name: String,
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct KubernetesNodeSpec {
+    #[serde(default)]
+    taints: Vec<KubernetesTaint>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KubernetesTaint {
+    key: String,
+    #[serde(default)]
+    value: String,
+    effect: String,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct KubernetesNodeStatus {
+    #[serde(default)]
+    conditions: Vec<KubernetesCondition>,
+}
+
+#[derive(serde::Deserialize)]
+struct KubernetesCondition {
+    #[serde(rename = "type")]
+    condition_type: String,
+    status: String,
+}
+
+fn inspect_kubernetes_nodes(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+) -> Result<BTreeMap<String, KubernetesNodeActual>> {
+    let command = command_spec(
+        &options.kubectl_path,
+        [
+            "--kubeconfig",
+            config.cluster.kubeconfig_out.as_str(),
+            "get",
+            "nodes",
+            "-o",
+            "json",
+        ],
+    );
+    let Some(output) = runner.output(&command)? else {
+        return Ok(BTreeMap::new());
+    };
+    let parsed: KubernetesNodeList =
+        serde_json::from_str(&output).context("failed to parse kubectl node JSON")?;
+    Ok(parsed
+        .items
+        .into_iter()
+        .map(|node| {
+            let ready =
+                node.status.conditions.iter().any(|condition| {
+                    condition.condition_type == "Ready" && condition.status == "True"
+                });
+            (
+                node.metadata.name,
+                KubernetesNodeActual {
+                    ready,
+                    labels: node.metadata.labels,
+                    taints: node
+                        .spec
+                        .taints
+                        .into_iter()
+                        .map(|taint| NodeTaint {
+                            key: taint.key,
+                            value: taint.value,
+                            effect: taint.effect,
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect())
+}
+
+fn print_cluster_reconcile_plan(plan: &ClusterReconcilePlan) {
+    let mut apply_count = 0usize;
+    let mut skip_count = 0usize;
+    for step in &plan.steps {
+        match step.kind {
+            ClusterReconcileStepKind::Apply(_) => apply_count += 1,
+            ClusterReconcileStepKind::SkipAlreadyCorrect { .. } => skip_count += 1,
+        }
+    }
+    println!(
+        "cluster reconcile summary: apply={} skip={}",
+        apply_count, skip_count
+    );
+    println!("steps: {}", plan.steps.len());
+    println!();
+    for (index, step) in plan.steps.iter().enumerate() {
+        println!("{}. {}", index + 1, step.description);
+        match &step.kind {
+            ClusterReconcileStepKind::Apply(operation) => print_cluster_operation(operation),
+            ClusterReconcileStepKind::SkipAlreadyCorrect { reason } => {
+                println!("   skip: {reason}");
+            }
+        }
+    }
+}
+
+fn print_cluster_operation(operation: &ClusterOperation) {
+    match operation {
+        ClusterOperation::EnsureToken { path } => {
+            println!("   generate token: {}", shell_quote(path));
+        }
+        ClusterOperation::StartFirstServer {
+            domain, command, ..
+        }
+        | ClusterOperation::StartJoinNode {
+            domain, command, ..
+        } => {
+            println!("   domain: {domain}");
+            println!("   command: {}", cluster_command_display(command));
+        }
+        ClusterOperation::WaitForFirstServer {
+            domain, command, ..
+        } => {
+            println!("   guest domain: {domain}");
+            println!("   guest command: {}", guest_command_display(command));
+        }
+        ClusterOperation::RetrieveKubeconfig {
+            domain,
+            guest_path,
+            host_path,
+            server_endpoint,
+            ..
+        } => {
+            println!("   guest domain: {domain}");
+            println!("   read: {}", shell_quote(guest_path));
+            println!("   write: {}", shell_quote(host_path));
+            println!("   server: {server_endpoint}");
+        }
+        ClusterOperation::WaitForClusterApi { command }
+        | ClusterOperation::WaitForNodeReady { command, .. } => {
+            println!("   command: {}", cluster_command_display(command));
+        }
+        ClusterOperation::ReconcileNodeLabels { commands, .. }
+        | ClusterOperation::ReconcileNodeTaints { commands, .. } => {
+            for command in commands {
+                println!("   command: {}", cluster_command_display(command));
+            }
+        }
+        ClusterOperation::ApplyAddon {
+            name,
+            manifest_path,
+            command,
+            marker_path,
+            ..
+        } => {
+            println!("   addon: {name}");
+            println!("   manifest: {}", shell_quote(manifest_path));
+            println!("   command: {}", cluster_command_display(command));
+            println!("   marker: {}", shell_quote(marker_path));
+        }
+        ClusterOperation::ApplyNasCsi {
+            manifest_path,
+            command,
+            marker_path,
+            ..
+        } => {
+            println!("   nas-csi manifest: {}", shell_quote(manifest_path));
+            println!("   command: {}", cluster_command_display(command));
+            println!("   marker: {}", shell_quote(marker_path));
+        }
+    }
+}
+
+fn print_cluster_status(
+    config: &HostConfig,
+    actual: &ClusterActualState,
+    manifests: &[DesiredManifest],
+) {
+    println!("cluster status");
+    println!();
+    println!("token: {}", bool_status(actual.token_present));
+    println!("kubeconfig: {}", bool_status(actual.kubeconfig_present));
+    println!("api ready: {}", bool_status(actual.api_ready));
+    println!();
+    println!("nodes:");
+    for node in &config.nodes {
+        let state = actual.nodes.get(&node.name).cloned().unwrap_or_default();
+        println!(
+            "- {}: domainRunning={} k3sReady={} kubernetesReady={} labels={} taints={}",
+            node.name,
+            state.domain_running,
+            state.k3s_ready,
+            state.kubernetes_ready,
+            state.labels.len(),
+            state.taints.len()
+        );
+    }
+    println!();
+    println!("substrate manifests:");
+    if manifests.is_empty() {
+        println!("- none configured");
+    }
+    for manifest in manifests {
+        println!(
+            "- {}: desired={} applied={}",
+            manifest.name,
+            manifest.desired_hash(),
+            actual
+                .applied_manifests
+                .get(&manifest.name)
+                .map(String::as_str)
+                .unwrap_or("none")
+        );
+    }
+}
+
+fn execute_cluster_reconcile_plan(
+    plan: &ClusterReconcilePlan,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    for step in &plan.steps {
+        match &step.kind {
+            ClusterReconcileStepKind::SkipAlreadyCorrect { reason } => {
+                println!("skip {}: {reason}", step.description);
+            }
+            ClusterReconcileStepKind::Apply(operation) => {
+                println!("{}", step.description);
+                execute_cluster_operation(operation, options, runner)
+                    .with_context(|| format!("failed cluster step: {}", step.description))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn execute_cluster_operation(
+    operation: &ClusterOperation,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    match operation {
+        ClusterOperation::EnsureToken { path } => ensure_cluster_token(path),
+        ClusterOperation::StartFirstServer { command, .. }
+        | ClusterOperation::StartJoinNode { command, .. } => run_cluster_command(runner, command),
+        ClusterOperation::WaitForFirstServer {
+            domain, command, ..
+        } => wait_for_guest_command(runner, options, domain, command),
+        ClusterOperation::RetrieveKubeconfig {
+            domain,
+            guest_path,
+            host_path,
+            server_endpoint,
+            ..
+        } => {
+            let kubeconfig = guest_exec_output(
+                runner,
+                options,
+                domain,
+                &GuestCommandSpec::new("/bin/cat".to_string(), [guest_path.to_string()]),
+            )?;
+            let rewritten =
+                nas_csi_cluster_manager::rewrite_kubeconfig_server(&kubeconfig, server_endpoint);
+            write_secret_text_atomic_if_changed(host_path, &rewritten, 0o600)?;
+            Ok(())
+        }
+        ClusterOperation::WaitForClusterApi { command }
+        | ClusterOperation::WaitForNodeReady { command, .. } => {
+            wait_for_cluster_command(runner, command)
+        }
+        ClusterOperation::ReconcileNodeLabels { commands, .. }
+        | ClusterOperation::ReconcileNodeTaints { commands, .. } => {
+            for command in commands {
+                run_cluster_command(runner, command)?;
+            }
+            Ok(())
+        }
+        ClusterOperation::ApplyAddon {
+            command,
+            marker_path,
+            desired_hash,
+            ..
+        }
+        | ClusterOperation::ApplyNasCsi {
+            command,
+            marker_path,
+            desired_hash,
+            ..
+        } => {
+            run_cluster_command(runner, command)?;
+            write_text_atomic_if_changed(marker_path, &format!("{desired_hash}\n"))?;
+            Ok(())
+        }
+    }
+}
+
+fn ensure_cluster_token(path: &str) -> Result<()> {
+    if let Ok(existing) = fs::read_to_string(path)
+        && nas_csi_cluster_manager::token_looks_valid(&existing)
+    {
+        return Ok(());
+    }
+    let token = generate_cluster_token()?;
+    write_secret_text_atomic_if_changed(path, &format!("{token}\n"), 0o600)?;
+    Ok(())
+}
+
+fn generate_cluster_token() -> Result<String> {
+    let mut file = File::open("/dev/urandom").context("failed to open /dev/urandom")?;
+    let mut bytes = [0_u8; 32];
+    std::io::Read::read_exact(&mut file, &mut bytes)
+        .context("failed to read random k3s token bytes")?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn run_cluster_command(runner: &impl CommandRunner, command: &ClusterCommandSpec) -> Result<()> {
+    runner.run(&cluster_command_to_vm_command(command))
+}
+
+fn wait_for_cluster_command(
+    runner: &impl CommandRunner,
+    command: &ClusterCommandSpec,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(600);
+    loop {
+        if runner.status(&cluster_command_to_vm_command(command))? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for command {}",
+                cluster_command_display(command)
+            );
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn wait_for_guest_command(
+    runner: &impl CommandRunner,
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    command: &GuestCommandSpec,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(600);
+    loop {
+        if guest_command_success(runner, options, domain, command)? {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for guest command on {domain}");
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn guest_command_success(
+    runner: &impl CommandRunner,
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    command: &GuestCommandSpec,
+) -> Result<bool> {
+    Ok(guest_exec(runner, options, domain, command)?.exit_code == 0)
+}
+
+fn guest_exec_output(
+    runner: &impl CommandRunner,
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    command: &GuestCommandSpec,
+) -> Result<String> {
+    let result = guest_exec(runner, options, domain, command)?;
+    if result.exit_code != 0 {
+        anyhow::bail!(
+            "guest command failed on {domain} with exit code {}: {}",
+            result.exit_code,
+            result.stderr
+        );
+    }
+    Ok(result.stdout)
+}
+
+struct GuestExecResult {
+    exit_code: i64,
+    stdout: String,
+    stderr: String,
+}
+
+fn guest_exec(
+    runner: &impl CommandRunner,
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    command: &GuestCommandSpec,
+) -> Result<GuestExecResult> {
+    let request = serde_json::json!({
+        "execute": "guest-exec",
+        "arguments": {
+            "path": command.program,
+            "arg": command.args,
+            "capture-output": true
+        }
+    });
+    let output = runner
+        .output(&virsh_qemu_agent_command(options, domain, request))?
+        .ok_or_else(|| anyhow::anyhow!("guest-exec returned no response for {domain}"))?;
+    let response: serde_json::Value =
+        serde_json::from_str(&output).context("failed to parse guest-exec response")?;
+    let pid = response
+        .pointer("/return/pid")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| anyhow::anyhow!("guest-exec response did not contain a pid"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let status_request = serde_json::json!({
+            "execute": "guest-exec-status",
+            "arguments": { "pid": pid }
+        });
+        let status_output = runner
+            .output(&virsh_qemu_agent_command(options, domain, status_request))?
+            .ok_or_else(|| anyhow::anyhow!("guest-exec-status returned no response"))?;
+        let status_response: serde_json::Value =
+            serde_json::from_str(&status_output).context("failed to parse guest-exec-status")?;
+        if status_response
+            .pointer("/return/exited")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            let exit_code = status_response
+                .pointer("/return/exitcode")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(1);
+            let stdout = decode_guest_exec_data(
+                status_response
+                    .pointer("/return/out-data")
+                    .and_then(serde_json::Value::as_str),
+            )?;
+            let stderr = decode_guest_exec_data(
+                status_response
+                    .pointer("/return/err-data")
+                    .and_then(serde_json::Value::as_str),
+            )?;
+            return Ok(GuestExecResult {
+                exit_code,
+                stdout,
+                stderr,
+            });
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for guest-exec-status pid {pid} on {domain}");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn virsh_qemu_agent_command(
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    request: serde_json::Value,
+) -> nas_csi_vm_manager::CommandSpec {
+    nas_csi_vm_manager::CommandSpec::new(
+        options.virsh_path.clone(),
+        [
+            "-c".to_string(),
+            options.libvirt_uri.clone(),
+            "qemu-agent-command".to_string(),
+            domain.to_string(),
+            request.to_string(),
+        ],
+    )
+}
+
+fn decode_guest_exec_data(value: Option<&str>) -> Result<String> {
+    let Some(value) = value else {
+        return Ok(String::new());
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .context("failed to decode guest-exec base64 output")?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn cluster_command_to_vm_command(command: &ClusterCommandSpec) -> nas_csi_vm_manager::CommandSpec {
+    nas_csi_vm_manager::CommandSpec::new(command.program.clone(), command.args.clone())
+}
+
+fn cluster_command_display(command: &ClusterCommandSpec) -> String {
+    cluster_command_to_vm_command(command).to_string()
+}
+
+fn guest_command_display(command: &GuestCommandSpec) -> String {
+    let command =
+        nas_csi_vm_manager::CommandSpec::new(command.program.clone(), command.args.clone());
+    command.to_string()
+}
+
+fn bool_status(value: bool) -> &'static str {
+    if value { "ok" } else { "missing" }
+}
+
+fn write_secret_text_atomic_if_changed(path: &str, contents: &str, mode: u32) -> Result<()> {
+    write_text_atomic_if_changed(path, contents)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("failed to set permissions on {path}"))?;
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]

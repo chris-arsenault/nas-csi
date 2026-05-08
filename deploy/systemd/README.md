@@ -7,8 +7,8 @@ Files:
 - `nas-csi-host-agent.service`: oneshot reconcile unit for the TrueNAS host.
 - `nas-csi-host-agent.env`: default environment file installed under
   `/etc/nas-csi`.
-- `install.sh`: installs the release binary, unit, environment file, and local
-  directories.
+- `install.sh`: installs the release binary, unit, environment file, local
+  directories, and packaged substrate manifests.
 - `uninstall.sh`: removes only the unit and binary; it leaves config, state,
   logs, secrets, and all TrueNAS datasets untouched.
 
@@ -50,6 +50,9 @@ from `/etc/nas-csi/host-agent.env`. It does not install application workloads.
 `/run/nas-csi` mode `0750`
 : Runtime files and virtiofs sockets. The unit also sets
   `RuntimeDirectory=nas-csi` so systemd recreates it on boot.
+
+`/usr/local/share/nas-csi/deploy` mode `0755`
+: Installed Kubernetes substrate manifests for `cluster apply --execute`.
 
 `/usr/local/sbin/nas-csi-host-agent` mode `0755`
 : Installed host-agent binary.

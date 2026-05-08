@@ -1,6 +1,7 @@
 # deploy/addons/metrics-server
 
-Placeholder for metrics-server substrate deployment.
+`metrics-server.yaml` is a substrate add-on manifest reconciled by the host
+agent when `cluster.addons.metricsServer` is enabled.
 
-The host agent should install this only when enabled in cluster desired state.
-Do not put application observability stacks here.
+This directory is limited to cluster infrastructure. Application observability
+stacks belong outside this repository.
