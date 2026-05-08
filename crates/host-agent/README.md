@@ -52,6 +52,8 @@ cargo run -p nas-csi-host-agent -- render \
 cargo run -p nas-csi-host-agent -- apply \
   --config .nas-csi/host.yaml \
   --artifact-dir .nas-csi/rendered
+cargo run -p nas-csi-host-agent -- status \
+  --config .nas-csi/host.yaml
 ```
 
 `materialize`, `render`, and default `apply` are non-mutating. `apply` renders
@@ -65,9 +67,28 @@ Execution is routed through a command runner abstraction that accepts only
 `program + argv` command specs. `--execute` refuses all changes if any reconcile
 step refused, never replaces an existing root disk, and refuses running-domain
 XML changes unless `--allow-running-domain-redefine` is passed. VM start remains
-out of the default apply path.
+out of the default apply path. Existing libvirt domains without `nas-csi`
+metadata are refused unless `--allow-domain-adoption` is passed, and virtiofsd
+start/restart operations wait for the expected Unix socket before continuing.
 
 Generated `HostConfig` carries discovered host tool paths under `hostTools`.
 Those paths feed render and apply, so systemd units use the discovered
 `virtiofsd` binary and host commands use the discovered `qemu-img`, `virsh`, and
 `systemctl` binaries.
+
+Guarded execution:
+
+```sh
+cargo run -p nas-csi-host-agent -- apply \
+  --config .nas-csi/host.yaml \
+  --artifact-dir .nas-csi/rendered \
+  --execute
+```
+
+Additional explicit escape hatches exist for narrow VM operations:
+
+- `--allow-running-domain-redefine` permits redefining a running managed domain.
+- `--allow-domain-adoption` permits adopting an existing stopped libvirt domain
+  that lacks `nas-csi` metadata.
+
+Both options are intentionally absent from the normal apply example.

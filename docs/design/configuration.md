@@ -11,6 +11,7 @@ The concrete config describes:
 - image and VM state datasets;
 - k3s cluster version and profile;
 - node VM resources and roles;
+- root disk base image path, format, and checksum;
 - dataset exports and policies;
 - substrate add-ons.
 
@@ -66,6 +67,24 @@ Authoritative:
 
 The host agent must require explicit opt-in before deleting authoritative
 storage objects.
+
+## Image Integrity
+
+`HostSelections.image` carries the operator-selected base cloud image path and
+an optional SHA-256 checksum:
+
+```yaml
+image:
+  source: /mnt/<pool>/nas-csi/images/debian.qcow2
+  checksum: sha256:<64-hex>
+```
+
+Materialization copies that value into each node `rootDisk.sourceChecksum`.
+Before creating a missing root disk overlay, reconcile verifies that
+`rootDisk.sourceImage` exists, that `qemu-img info` reports the configured
+`rootDisk.sourceFormat`, and that the file SHA-256 matches
+`rootDisk.sourceChecksum`. A missing checksum is a refusal for backed root disk
+creation because the base image is executable VM state.
 
 ## Repo Boundary
 

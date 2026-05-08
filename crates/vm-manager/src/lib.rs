@@ -58,6 +58,12 @@ pub fn extract_domain_desired_hash(xml: &str) -> Option<String> {
     }
 }
 
+pub fn extract_domain_managed(xml: &str) -> bool {
+    xml.contains("nas-csi")
+        && (xml.contains("desired-domain-hash")
+            || xml.contains("<nas-csi:managed>true</nas-csi:managed>"))
+}
+
 fn render_domain_xml_with_metadata(spec: &DomainSpec, desired_hash: Option<&str>) -> String {
     let mut devices = String::new();
     devices.push_str(&format!(
@@ -96,7 +102,7 @@ fn render_domain_xml_with_metadata(spec: &DomainSpec, desired_hash: Option<&str>
     let metadata = desired_hash
         .map(|hash| {
             format!(
-                "  <metadata>\n    <nas-csi:desired-domain-hash xmlns:nas-csi='urn:nas-csi.dev:domain'>{}</nas-csi:desired-domain-hash>\n  </metadata>\n",
+                "  <metadata>\n    <nas-csi:managed xmlns:nas-csi='urn:nas-csi.dev:domain'>true</nas-csi:managed>\n    <nas-csi:desired-domain-hash xmlns:nas-csi='urn:nas-csi.dev:domain'>{}</nas-csi:desired-domain-hash>\n  </metadata>\n",
                 xml_escape(hash)
             )
         })
@@ -257,6 +263,7 @@ pub struct HostApplyPlanOptions {
     pub systemctl_path: String,
     pub start_domains: bool,
     pub allow_running_domain_redefine: bool,
+    pub allow_domain_adoption: bool,
 }
 
 impl Default for HostApplyPlanOptions {
@@ -269,6 +276,7 @@ impl Default for HostApplyPlanOptions {
             systemctl_path: "systemctl".to_string(),
             start_domains: false,
             allow_running_domain_redefine: false,
+            allow_domain_adoption: false,
         }
     }
 }
@@ -345,6 +353,7 @@ pub struct PathActualState {
     pub kind: PathActualKind,
     pub size: Option<u64>,
     pub content_hash: Option<String>,
+    pub sha256: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -361,6 +370,7 @@ impl PathActualState {
             kind: PathActualKind::Missing,
             size: None,
             content_hash: None,
+            sha256: None,
         }
     }
 
@@ -369,6 +379,16 @@ impl PathActualState {
             kind: PathActualKind::File,
             size: Some(contents.len() as u64),
             content_hash: Some(content_hash(contents)),
+            sha256: None,
+        }
+    }
+
+    pub fn file_with_sha256(contents: &[u8], sha256: impl Into<String>) -> Self {
+        Self {
+            kind: PathActualKind::File,
+            size: Some(contents.len() as u64),
+            content_hash: Some(content_hash(contents)),
+            sha256: Some(sha256.into()),
         }
     }
 
@@ -377,6 +397,7 @@ impl PathActualState {
             kind: PathActualKind::Directory,
             size: None,
             content_hash: None,
+            sha256: None,
         }
     }
 
@@ -416,6 +437,7 @@ pub struct SystemdUnitActualState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DomainActualState {
     pub exists: bool,
+    pub managed: bool,
     pub active: bool,
     pub autostart: Option<bool>,
     pub desired_hash: Option<String>,
@@ -480,6 +502,11 @@ pub enum ReconcileOperation {
         path: String,
         command: CommandSpec,
     },
+    ResizeRootDisk {
+        path: String,
+        desired_size_bytes: u64,
+        command: CommandSpec,
+    },
     RewriteSeedImage {
         path: String,
         contents: Vec<u8>,
@@ -494,10 +521,12 @@ pub enum ReconcileOperation {
     },
     EnableAndStartVirtiofsdService {
         unit_name: String,
+        socket_path: String,
         command: CommandSpec,
     },
     RestartVirtiofsdService {
         unit_name: String,
+        socket_path: String,
         command: CommandSpec,
     },
     DefineDomain {
@@ -781,6 +810,8 @@ pub fn plan_host_reconcile(
         })
         .collect::<BTreeMap<_, _>>();
     let desired_domains = desired_domain_states(config, apply_options, render_options)?;
+    let desired_root_disks = desired_root_disk_states(config);
+    let desired_virtiofs_units = desired_virtiofs_unit_states(config, render_options);
     let systemd_unit_dir = Path::new(&apply_options.systemd_unit_dir);
 
     for step in &apply_plan.steps {
@@ -868,6 +899,8 @@ pub fn plan_host_reconcile(
                     actual,
                     &changed_units,
                     &desired_domains,
+                    &desired_root_disks,
+                    &desired_virtiofs_units,
                 );
             }
         }
@@ -885,11 +918,20 @@ fn reconcile_command_step(
     actual: &HostActualState,
     changed_units: &BTreeSet<String>,
     desired_domains: &BTreeMap<String, DesiredDomainState>,
+    desired_root_disks: &BTreeMap<String, DesiredRootDiskState>,
+    desired_virtiofs_units: &BTreeMap<String, DesiredVirtiofsUnitState>,
 ) {
     if let Some(path) = creates {
         if actual_path(actual, path).exists() {
             if command.program == apply_options.qemu_img_path {
-                reconcile_existing_qemu_image(steps, step, command, path, actual);
+                reconcile_existing_qemu_image(
+                    steps,
+                    step,
+                    command,
+                    path,
+                    actual,
+                    desired_root_disks.get(path),
+                );
             } else {
                 steps.push(skip(&step.description, "create target already exists"));
             }
@@ -910,8 +952,30 @@ fn reconcile_command_step(
         return;
     }
 
+    if command.program == apply_options.qemu_img_path
+        && command.args.first().map(String::as_str) == Some("create")
+        && let Some(path) = creates
+    {
+        reconcile_missing_root_disk_create(
+            steps,
+            step,
+            command,
+            path,
+            actual,
+            desired_root_disks.get(path),
+        );
+        return;
+    }
+
     if command.program == apply_options.systemctl_path {
-        reconcile_systemctl_step(steps, step, command, actual, changed_units);
+        reconcile_systemctl_step(
+            steps,
+            step,
+            command,
+            actual,
+            changed_units,
+            desired_virtiofs_units,
+        );
         return;
     }
 
@@ -923,6 +987,7 @@ fn reconcile_command_step(
             actual,
             desired_domains,
             apply_options.allow_running_domain_redefine,
+            apply_options.allow_domain_adoption,
         );
         return;
     }
@@ -939,6 +1004,7 @@ fn reconcile_systemctl_step(
     command: &CommandSpec,
     actual: &HostActualState,
     changed_units: &BTreeSet<String>,
+    desired_virtiofs_units: &BTreeMap<String, DesiredVirtiofsUnitState>,
 ) {
     if command.args == ["daemon-reload"] {
         if changed_units.is_empty() {
@@ -960,6 +1026,10 @@ fn reconcile_systemctl_step(
         let enabled = unit.and_then(|unit| unit.enabled).unwrap_or(false);
         let active = unit.and_then(|unit| unit.active).unwrap_or(false);
         let unit_changed = changed_units.contains(unit_name);
+        let socket_path = desired_virtiofs_units
+            .get(unit_name)
+            .map(|unit| unit.socket_path.clone())
+            .unwrap_or_default();
 
         if enabled && active && !unit_changed {
             steps.push(skip(
@@ -971,6 +1041,7 @@ fn reconcile_systemctl_step(
                 description: format!("restart changed systemd unit {unit_name}"),
                 kind: ReconcileStepKind::Apply(ReconcileOperation::RestartVirtiofsdService {
                     unit_name: unit_name.clone(),
+                    socket_path,
                     command: CommandSpec::new(
                         command.program.clone(),
                         ["restart".to_string(), unit_name.clone()],
@@ -982,6 +1053,7 @@ fn reconcile_systemctl_step(
                 step,
                 ReconcileOperation::EnableAndStartVirtiofsdService {
                     unit_name: unit_name.clone(),
+                    socket_path,
                     command: command.clone(),
                 },
             ));
@@ -998,12 +1070,107 @@ fn reconcile_systemctl_step(
     ));
 }
 
+fn reconcile_missing_root_disk_create(
+    steps: &mut Vec<ReconcileStep>,
+    step: &ApplyStep,
+    command: &CommandSpec,
+    path: &str,
+    actual: &HostActualState,
+    desired: Option<&DesiredRootDiskState>,
+) {
+    let operation = ReconcileOperation::CreateRootDisk {
+        path: path.to_string(),
+        command: command.clone(),
+    };
+    let Some(desired) = desired else {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            "root disk creation target was not present in desired node config",
+        ));
+        return;
+    };
+
+    let Some(source_image) = desired.source_image.as_deref() else {
+        steps.push(apply(step, operation));
+        return;
+    };
+    if actual_path(actual, source_image).kind != PathActualKind::File {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            format!("base image {source_image} does not exist or is not a regular file"),
+        ));
+        return;
+    }
+
+    let Some(source_format) = desired.source_format.as_deref() else {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            format!("base image {source_image} format is not configured"),
+        ));
+        return;
+    };
+    let Some(source_info) = actual.qemu_images.get(source_image) else {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            format!("base image {source_image} qemu-img info was unavailable"),
+        ));
+        return;
+    };
+    if source_info.format.as_deref() != Some(source_format) {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            format!(
+                "base image {source_image} format {:?} does not match expected {source_format}",
+                source_info.format
+            ),
+        ));
+        return;
+    }
+
+    let Some(expected_checksum) = desired.source_checksum.as_deref() else {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            format!("base image {source_image} checksum is not configured"),
+        ));
+        return;
+    };
+    let Some(expected_checksum) = normalize_sha256(expected_checksum) else {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            format!("base image {source_image} checksum is not a valid sha256 value"),
+        ));
+        return;
+    };
+    let actual_checksum = actual_path(actual, source_image)
+        .sha256
+        .as_deref()
+        .and_then(normalize_sha256);
+    if actual_checksum.as_deref() != Some(expected_checksum.as_str()) {
+        steps.push(refuse(
+            &step.description,
+            Some(operation),
+            format!("base image {source_image} checksum does not match configured sha256"),
+        ));
+        return;
+    }
+
+    steps.push(apply(step, operation));
+}
+
 fn reconcile_existing_qemu_image(
     steps: &mut Vec<ReconcileStep>,
     step: &ApplyStep,
     command: &CommandSpec,
     path: &str,
     actual: &HostActualState,
+    desired: Option<&DesiredRootDiskState>,
 ) {
     if !tool_found(actual, &command.program) {
         steps.push(refuse(
@@ -1020,7 +1187,6 @@ fn reconcile_existing_qemu_image(
         return;
     }
 
-    let expected = expected_qemu_image_from_create_command(command);
     let Some(actual_image) = actual.qemu_images.get(path) else {
         steps.push(refuse(
             &step.description,
@@ -1033,7 +1199,19 @@ fn reconcile_existing_qemu_image(
         return;
     };
 
-    if let Some(expected_format) = expected.format.as_deref()
+    let Some(desired) = desired else {
+        steps.push(refuse(
+            &step.description,
+            Some(ReconcileOperation::CreateRootDisk {
+                path: path.to_string(),
+                command: command.clone(),
+            }),
+            "existing root disk target was not present in desired node config",
+        ));
+        return;
+    };
+
+    if let Some(expected_format) = desired.format.as_deref()
         && actual_image.format.as_deref() != Some(expected_format)
     {
         steps.push(refuse(
@@ -1049,7 +1227,7 @@ fn reconcile_existing_qemu_image(
         ));
         return;
     }
-    if let Some(expected_backing) = expected.backing_file.as_deref()
+    if let Some(expected_backing) = desired.source_image.as_deref()
         && actual_image.backing_file.as_deref() != Some(expected_backing)
     {
         steps.push(refuse(
@@ -1066,35 +1244,48 @@ fn reconcile_existing_qemu_image(
         return;
     }
 
+    let Some(actual_size) = actual_image.virtual_size else {
+        steps.push(refuse(
+            &step.description,
+            Some(ReconcileOperation::CreateRootDisk {
+                path: path.to_string(),
+                command: command.clone(),
+            }),
+            "root disk already exists but qemu-img virtual-size was unavailable; resize safety could not be checked",
+        ));
+        return;
+    };
+    if actual_size < desired.size_bytes {
+        steps.push(ReconcileStep {
+            description: format!("resize root disk {path}"),
+            kind: ReconcileStepKind::Apply(ReconcileOperation::ResizeRootDisk {
+                path: path.to_string(),
+                desired_size_bytes: desired.size_bytes,
+                command: qemu_img_resize_command(&command.program, path, &desired.size_arg),
+            }),
+        });
+        return;
+    }
+    if actual_size > desired.size_bytes {
+        steps.push(refuse(
+            &step.description,
+            Some(ReconcileOperation::ResizeRootDisk {
+                path: path.to_string(),
+                desired_size_bytes: desired.size_bytes,
+                command: qemu_img_resize_command(&command.program, path, &desired.size_arg),
+            }),
+            format!(
+                "root disk {path} is larger than desired size {}; destructive shrink refused",
+                desired.size_arg
+            ),
+        ));
+        return;
+    }
+
     steps.push(skip(
         &step.description,
         "root disk already exists and qemu-img info matches desired shape",
     ));
-}
-
-fn expected_qemu_image_from_create_command(command: &CommandSpec) -> QemuImageActualState {
-    let mut format = None;
-    let mut backing_file = None;
-    let mut index = 0;
-    while index < command.args.len() {
-        match command.args[index].as_str() {
-            "-f" => {
-                format = command.args.get(index + 1).cloned();
-                index += 2;
-            }
-            "-b" => {
-                backing_file = command.args.get(index + 1).cloned();
-                index += 2;
-            }
-            _ => index += 1,
-        }
-    }
-
-    QemuImageActualState {
-        format,
-        backing_file,
-        virtual_size: None,
-    }
 }
 
 fn reconcile_virsh_step(
@@ -1104,6 +1295,7 @@ fn reconcile_virsh_step(
     actual: &HostActualState,
     desired_domains: &BTreeMap<String, DesiredDomainState>,
     allow_running_domain_redefine: bool,
+    allow_domain_adoption: bool,
 ) {
     let Some(subcommand) = command.args.get(2).map(String::as_str) else {
         steps.push(apply(
@@ -1143,6 +1335,20 @@ fn reconcile_virsh_step(
             };
             let domain = actual.domains.get(&desired.domain);
             match domain {
+                Some(domain) if domain.exists && !domain.managed && !allow_domain_adoption => {
+                    steps.push(refuse(
+                        &step.description,
+                        Some(ReconcileOperation::DefineDomain {
+                            domain: desired.domain.clone(),
+                            xml_path: xml_path.clone(),
+                            command: command.clone(),
+                        }),
+                        format!(
+                            "domain {} exists without nas-csi metadata; adoption requires explicit allow_domain_adoption",
+                            desired.domain
+                        ),
+                    ));
+                }
                 Some(domain)
                     if domain.exists
                         && domain.desired_hash.as_deref()
@@ -1265,6 +1471,66 @@ struct DesiredDomainState {
     desired_hash: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesiredRootDiskState {
+    format: Option<String>,
+    source_image: Option<String>,
+    source_format: Option<String>,
+    source_checksum: Option<String>,
+    size_arg: String,
+    size_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DesiredVirtiofsUnitState {
+    socket_path: String,
+}
+
+fn desired_root_disk_states(config: &HostConfig) -> BTreeMap<String, DesiredRootDiskState> {
+    config
+        .nodes
+        .iter()
+        .map(|node| {
+            (
+                node.root_disk.image.clone(),
+                DesiredRootDiskState {
+                    format: Some(disk_format_name(node.root_disk.format).to_string()),
+                    source_image: node.root_disk.source_image.clone(),
+                    source_format: node
+                        .root_disk
+                        .source_format
+                        .map(disk_format_name)
+                        .map(str::to_string),
+                    source_checksum: node.root_disk.source_checksum.clone(),
+                    size_arg: format!("{}G", node.root_disk.size_gib),
+                    size_bytes: gib_to_bytes(node.root_disk.size_gib),
+                },
+            )
+        })
+        .collect()
+}
+
+fn desired_virtiofs_unit_states(
+    config: &HostConfig,
+    render_options: &ArtifactRenderOptions,
+) -> BTreeMap<String, DesiredVirtiofsUnitState> {
+    let mut units = BTreeMap::new();
+    for node in &config.nodes {
+        for export_id in &node.exports {
+            units.insert(
+                format!(
+                    "{}.service",
+                    virtiofsd_service_name(&node.domain, export_id)
+                ),
+                DesiredVirtiofsUnitState {
+                    socket_path: virtiofs_socket_path(render_options, &node.domain, export_id),
+                },
+            );
+        }
+    }
+    units
+}
+
 fn desired_domain_states(
     config: &HostConfig,
     apply_options: &HostApplyPlanOptions,
@@ -1289,11 +1555,21 @@ fn desired_domain_states(
     Ok(desired)
 }
 
+fn normalize_sha256(value: &str) -> Option<String> {
+    let value = value
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or_else(|| value.trim())
+        .to_ascii_lowercase();
+    (value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())).then_some(value)
+}
+
 fn actual_path<'a>(actual: &'a HostActualState, path: &str) -> &'a PathActualState {
     static MISSING: PathActualState = PathActualState {
         kind: PathActualKind::Missing,
         size: None,
         content_hash: None,
+        sha256: None,
     };
     actual.paths.get(path).unwrap_or(&MISSING)
 }
@@ -1378,12 +1654,14 @@ fn operation_for_command(
         if command.args.len() == 3 && command.args[0] == "enable" && command.args[1] == "--now" {
             return ReconcileOperation::EnableAndStartVirtiofsdService {
                 unit_name: command.args[2].clone(),
+                socket_path: String::new(),
                 command: command.clone(),
             };
         }
         if command.args.len() == 2 && command.args[0] == "restart" {
             return ReconcileOperation::RestartVirtiofsdService {
                 unit_name: command.args[1].clone(),
+                socket_path: String::new(),
                 command: command.clone(),
             };
         }
@@ -1481,6 +1759,13 @@ pub fn qemu_img_create_command(program: &str, node: &NodeConfig) -> CommandSpec 
     args.push(node.root_disk.image.clone());
     args.push(format!("{}G", node.root_disk.size_gib));
     CommandSpec::new(program.to_string(), args)
+}
+
+pub fn qemu_img_resize_command(program: &str, path: &str, size_arg: &str) -> CommandSpec {
+    CommandSpec::new(
+        program.to_string(),
+        ["resize".to_string(), path.to_string(), size_arg.to_string()],
+    )
 }
 
 fn virsh_command(
@@ -1824,6 +2109,10 @@ fn round_up(value: usize, multiple: usize) -> usize {
     value.div_ceil(multiple) * multiple
 }
 
+fn gib_to_bytes(value: u64) -> u64 {
+    value.saturating_mul(1024 * 1024 * 1024)
+}
+
 pub fn content_hash(contents: &[u8]) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in contents {
@@ -1982,6 +2271,9 @@ impl Serialize for CloudInitWriteFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SAMPLE_BASE_SHA256: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     use std::io::Read;
 
     #[test]
@@ -2010,7 +2302,9 @@ mod tests {
         assert!(xml.contains("<driver type='virtiofs' queue='1024'/>"));
         assert!(xml.contains("<target dir='nascsi_export'/>"));
         assert!(xml.contains("<metadata>"));
+        assert!(xml.contains("<nas-csi:managed"));
         assert!(xml.contains("desired-domain-hash"));
+        assert!(extract_domain_managed(&xml));
         assert_eq!(
             extract_domain_desired_hash(&xml),
             Some(domain_desired_hash(&DomainSpec {
@@ -2309,6 +2603,7 @@ mod tests {
             "nascsi-server-1".to_string(),
             DomainActualState {
                 exists: true,
+                managed: true,
                 active: true,
                 autostart: Some(true),
                 desired_hash: Some(content_hash(b"different domain shape")),
@@ -2346,6 +2641,7 @@ mod tests {
             "nascsi-server-1".to_string(),
             DomainActualState {
                 exists: true,
+                managed: true,
                 active: true,
                 autostart: Some(true),
                 desired_hash: Some(content_hash(b"different domain shape")),
@@ -2361,6 +2657,142 @@ mod tests {
         assert!(reconcile.steps.iter().any(|step| matches!(
             &step.kind,
             ReconcileStepKind::Apply(ReconcileOperation::RedefineDomain { domain, .. })
+                if domain == "nascsi-server-1"
+        )));
+    }
+
+    #[test]
+    fn reconcile_refuses_unmanaged_existing_domain_without_adoption() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            ..HostApplyPlanOptions::default()
+        };
+        let desired_apply =
+            plan_host_apply(&config, &render_options, &apply_options).expect("apply plan");
+        let mut actual =
+            current_actual_state(&config, &render_options, &apply_options, &desired_apply);
+        actual.domains.insert(
+            "nascsi-server-1".to_string(),
+            DomainActualState {
+                exists: true,
+                managed: false,
+                active: false,
+                autostart: Some(false),
+                desired_hash: None,
+                xml: Some("<domain><name>nascsi-server-1</name></domain>".to_string()),
+                xml_hash: Some(content_hash(b"unmanaged domain xml")),
+            },
+        );
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(reconcile.has_refusals());
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Refuse { reason, .. }
+                if reason.contains("without nas-csi metadata") && reason.contains("adoption")
+        )));
+    }
+
+    #[test]
+    fn reconcile_allows_explicit_adoption_of_stopped_unmanaged_domain() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            allow_domain_adoption: true,
+            ..HostApplyPlanOptions::default()
+        };
+        let desired_apply =
+            plan_host_apply(&config, &render_options, &apply_options).expect("apply plan");
+        let mut actual =
+            current_actual_state(&config, &render_options, &apply_options, &desired_apply);
+        actual.domains.insert(
+            "nascsi-server-1".to_string(),
+            DomainActualState {
+                exists: true,
+                managed: false,
+                active: false,
+                autostart: Some(false),
+                desired_hash: None,
+                xml: Some("<domain><name>nascsi-server-1</name></domain>".to_string()),
+                xml_hash: Some(content_hash(b"unmanaged domain xml")),
+            },
+        );
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(!reconcile.has_refusals());
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Apply(ReconcileOperation::RedefineDomain { domain, .. })
+                if domain == "nascsi-server-1"
+        )));
+    }
+
+    #[test]
+    fn reconcile_redefines_stopped_managed_domain_without_starting_by_default() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            ..HostApplyPlanOptions::default()
+        };
+        let desired_apply =
+            plan_host_apply(&config, &render_options, &apply_options).expect("apply plan");
+        let mut actual =
+            current_actual_state(&config, &render_options, &apply_options, &desired_apply);
+        actual
+            .domains
+            .insert("nascsi-server-1".to_string(), changed_managed_domain(false));
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(!reconcile.has_refusals());
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Apply(ReconcileOperation::RedefineDomain { domain, .. })
+                if domain == "nascsi-server-1"
+        )));
+        assert!(!reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Apply(ReconcileOperation::StartDomain { domain, .. })
+                if domain == "nascsi-server-1"
+        )));
+    }
+
+    #[test]
+    fn reconcile_can_start_redefined_stopped_domain_when_start_policy_is_enabled() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            start_domains: true,
+            ..HostApplyPlanOptions::default()
+        };
+        let desired_apply =
+            plan_host_apply(&config, &render_options, &apply_options).expect("apply plan");
+        let mut actual =
+            current_actual_state(&config, &render_options, &apply_options, &desired_apply);
+        actual
+            .domains
+            .insert("nascsi-server-1".to_string(), changed_managed_domain(false));
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Apply(ReconcileOperation::StartDomain { domain, .. })
                 if domain == "nascsi-server-1"
         )));
     }
@@ -2459,6 +2891,156 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_refuses_root_disk_create_when_base_image_missing() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            ..HostApplyPlanOptions::default()
+        };
+        let mut actual = HostActualState::default();
+        actual.tools.insert(
+            "qemu-img".to_string(),
+            ToolActualState::found("/usr/bin/qemu-img"),
+        );
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Refuse {
+                operation: Some(ReconcileOperation::CreateRootDisk { path, .. }),
+                reason
+            } if path == "/mnt/pool/nas-csi/vms/nascsi-server-1.qcow2"
+                && reason.contains("base image")
+                && reason.contains("does not exist")
+        )));
+    }
+
+    #[test]
+    fn reconcile_refuses_root_disk_create_when_base_format_differs() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            ..HostApplyPlanOptions::default()
+        };
+        let mut actual = HostActualState::default();
+        actual.tools.insert(
+            "qemu-img".to_string(),
+            ToolActualState::found("/usr/bin/qemu-img"),
+        );
+        actual.paths.insert(
+            "/mnt/pool/nas-csi/images/debian.qcow2".to_string(),
+            PathActualState::file_with_sha256(b"base image", SAMPLE_BASE_SHA256),
+        );
+        actual.qemu_images.insert(
+            "/mnt/pool/nas-csi/images/debian.qcow2".to_string(),
+            QemuImageActualState {
+                format: Some("raw".to_string()),
+                backing_file: None,
+                virtual_size: Some(8 * 1024 * 1024 * 1024),
+            },
+        );
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Refuse {
+                operation: Some(ReconcileOperation::CreateRootDisk { path, .. }),
+                reason
+            } if path == "/mnt/pool/nas-csi/vms/nascsi-server-1.qcow2"
+                && reason.contains("format")
+                && reason.contains("expected qcow2")
+        )));
+    }
+
+    #[test]
+    fn reconcile_refuses_root_disk_create_when_base_checksum_differs() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            ..HostApplyPlanOptions::default()
+        };
+        let mut actual = HostActualState::default();
+        actual.tools.insert(
+            "qemu-img".to_string(),
+            ToolActualState::found("/usr/bin/qemu-img"),
+        );
+        actual.paths.insert(
+            "/mnt/pool/nas-csi/images/debian.qcow2".to_string(),
+            PathActualState::file_with_sha256(
+                b"base image",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+        );
+        actual.qemu_images.insert(
+            "/mnt/pool/nas-csi/images/debian.qcow2".to_string(),
+            QemuImageActualState {
+                format: Some("qcow2".to_string()),
+                backing_file: None,
+                virtual_size: Some(8 * 1024 * 1024 * 1024),
+            },
+        );
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Refuse {
+                operation: Some(ReconcileOperation::CreateRootDisk { path, .. }),
+                reason
+            } if path == "/mnt/pool/nas-csi/vms/nascsi-server-1.qcow2"
+                && reason.contains("checksum")
+        )));
+    }
+
+    #[test]
+    fn reconcile_resizes_existing_root_disk_when_smaller_than_desired() {
+        let config = sample_host_config();
+        let render_options = ArtifactRenderOptions::default();
+        let apply_options = HostApplyPlanOptions {
+            artifact_dir: "/tmp/nas-csi/rendered".to_string(),
+            systemd_unit_dir: "/tmp/systemd".to_string(),
+            ..HostApplyPlanOptions::default()
+        };
+        let desired_apply =
+            plan_host_apply(&config, &render_options, &apply_options).expect("apply plan");
+        let mut actual =
+            current_actual_state(&config, &render_options, &apply_options, &desired_apply);
+        actual.qemu_images.insert(
+            "/mnt/pool/nas-csi/vms/nascsi-server-1.qcow2".to_string(),
+            QemuImageActualState {
+                format: Some("qcow2".to_string()),
+                backing_file: Some("/mnt/pool/nas-csi/images/debian.qcow2".to_string()),
+                virtual_size: Some(40 * 1024 * 1024 * 1024),
+            },
+        );
+
+        let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
+            .expect("reconcile plan");
+
+        assert!(reconcile.steps.iter().any(|step| matches!(
+            &step.kind,
+            ReconcileStepKind::Apply(ReconcileOperation::ResizeRootDisk {
+                path,
+                desired_size_bytes,
+                command
+            }) if path == "/mnt/pool/nas-csi/vms/nascsi-server-1.qcow2"
+                && *desired_size_bytes == 80_u64 * 1024 * 1024 * 1024
+                && command.args == ["resize", "/mnt/pool/nas-csi/vms/nascsi-server-1.qcow2", "80G"]
+        )));
+    }
+
+    #[test]
     fn reconcile_uses_named_operations_for_missing_state() {
         let config = sample_host_config();
         let render_options = ArtifactRenderOptions::default();
@@ -2479,6 +3061,18 @@ mod tests {
         actual.tools.insert(
             "virsh".to_string(),
             ToolActualState::found("/usr/bin/virsh"),
+        );
+        actual.paths.insert(
+            "/mnt/pool/nas-csi/images/debian.qcow2".to_string(),
+            PathActualState::file_with_sha256(b"base image", SAMPLE_BASE_SHA256),
+        );
+        actual.qemu_images.insert(
+            "/mnt/pool/nas-csi/images/debian.qcow2".to_string(),
+            QemuImageActualState {
+                format: Some("qcow2".to_string()),
+                backing_file: None,
+                virtual_size: Some(8 * 1024 * 1024 * 1024),
+            },
         );
 
         let reconcile = plan_host_reconcile(&config, &render_options, &apply_options, &actual)
@@ -2593,6 +3187,7 @@ mod tests {
                     image: "/mnt/pool/nas-csi/vms/nascsi-server-1.qcow2".to_string(),
                     source_image: Some("/mnt/pool/nas-csi/images/debian.qcow2".to_string()),
                     source_format: Some(DiskFormat::Qcow2),
+                    source_checksum: Some(format!("sha256:{SAMPLE_BASE_SHA256}")),
                     size_gib: 80,
                     format: DiskFormat::Qcow2,
                 },
@@ -2607,6 +3202,19 @@ mod tests {
                 exports: vec!["repos".to_string()],
             }],
             exports,
+        }
+    }
+
+    fn changed_managed_domain(active: bool) -> DomainActualState {
+        let xml = "<domain><name>nascsi-server-1</name><metadata><nas-csi:managed xmlns:nas-csi='urn:nas-csi.dev:domain'>true</nas-csi:managed></metadata></domain>";
+        DomainActualState {
+            exists: true,
+            managed: true,
+            active,
+            autostart: Some(true),
+            desired_hash: Some(content_hash(b"different domain shape")),
+            xml: Some(xml.to_string()),
+            xml_hash: Some(content_hash(xml.as_bytes())),
         }
     }
 
@@ -2680,6 +3288,23 @@ mod tests {
             }
         }
 
+        for node in &config.nodes {
+            if let Some(source_image) = &node.root_disk.source_image {
+                actual.paths.insert(
+                    source_image.clone(),
+                    PathActualState::file_with_sha256(b"base image", SAMPLE_BASE_SHA256),
+                );
+                actual.qemu_images.insert(
+                    source_image.clone(),
+                    QemuImageActualState {
+                        format: Some("qcow2".to_string()),
+                        backing_file: None,
+                        virtual_size: Some(8 * 1024 * 1024 * 1024),
+                    },
+                );
+            }
+        }
+
         let artifacts = render_host_artifacts(config, render_options).expect("render");
         for node in &config.nodes {
             let relative_path = format!("nodes/{}/domain.xml", safe_path_segment(&node.name));
@@ -2688,6 +3313,7 @@ mod tests {
                 node.domain.clone(),
                 DomainActualState {
                     exists: true,
+                    managed: true,
                     active: false,
                     autostart: Some(node.autostart),
                     desired_hash: extract_domain_desired_hash(xml),

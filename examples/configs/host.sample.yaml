@@ -61,6 +61,7 @@ nodes:
       image: /mnt/tank/nas-csi/vms/nascsi-server-1.qcow2
       sourceImage: /mnt/tank/nas-csi/images/debian-12-genericcloud-amd64.qcow2
       sourceFormat: qcow2
+      sourceChecksum: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       sizeGib: 80
       format: qcow2
     k3s:
@@ -87,6 +88,7 @@ nodes:
       image: /mnt/tank/nas-csi/vms/nascsi-agent-1.qcow2
       sourceImage: /mnt/tank/nas-csi/images/debian-12-genericcloud-amd64.qcow2
       sourceFormat: qcow2
+      sourceChecksum: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       sizeGib: 120
       format: qcow2
     k3s:

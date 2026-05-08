@@ -29,9 +29,10 @@ The generated domain XML assumes QEMU shared memory backing for virtiofs. The
 generated systemd units keep virtiofsd under host-agent ownership by using
 stable sockets under `/run/nas-csi/virtiofs`.
 
-Domain XML includes a `nas-csi` metadata marker containing a hash of the
-project-owned domain shape. Reconciliation compares that managed marker instead
-of raw `virsh dumpxml` output, because libvirt expands domain XML after define.
+Domain XML includes `nas-csi` metadata plus a hash of the project-owned domain
+shape. Reconciliation refuses existing unmarked domains unless adoption is
+explicitly enabled, and compares the managed marker instead of raw `virsh
+dumpxml` output because libvirt expands domain XML after define.
 
 Cloud-init also writes `/etc/nas-csi/node.yaml` and a managed virtiofs fstab
 fragment so each VM mounts exports under `/var/lib/nas-csi/virtiofs/<export>`.
@@ -49,10 +50,11 @@ Seed images are small VFAT volumes labeled `CIDATA` with `user-data` and
 `meta-data` files at the root.
 
 Reconcile planning consumes actual host state and converts desired state into
-named operations such as `CreateRootDisk`, `RewriteSeedImage`,
+named operations such as `CreateRootDisk`, `ResizeRootDisk`, `RewriteSeedImage`,
 `InstallOrUpdateSystemdUnit`, `RestartVirtiofsdService`, `DefineDomain`, and
 `RedefineDomainRequiresShutdown`. It skips matching files and seed images by
-content hash, validates existing root disk overlays with `qemu-img info`,
+content hash, validates base image existence, format, and SHA-256 before root
+disk creation, validates existing root disk overlays with `qemu-img info`,
 refuses unknown or mismatched root disks instead of replacing them, reloads or
 restarts systemd units only when their installed contents change, and refuses to
 redefine a running libvirt domain unless explicitly allowed.

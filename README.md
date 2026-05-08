@@ -32,12 +32,15 @@ CSI remains useful for app-private storage, but it does not satisfy the
 - State-aware host reconciliation with `apply`, `skip`, and `refuse` decisions.
 - Rust-generated cloud-init NoCloud seed images, with no external ISO tooling.
 - Project-owned libvirt metadata hashes for stable managed-domain comparison.
+- Execute safety for base image validation, root disk growth, virtiofs socket
+  readiness, and explicit libvirt domain adoption.
 
 ## Current Build Slice
 
 The repository currently implements the Rust workspace, typed config model,
 read-only discovery, host config materialization, VM artifact rendering,
-cloud-init seed generation, and dry-run host reconciliation.
+cloud-init seed generation, state-aware host reconciliation, and an early
+guarded `apply --execute` path for VM/runtime substrate changes.
 
 ```bash
 cargo run -p nas-csi-host-agent -- validate-intent \
@@ -59,10 +62,16 @@ cargo run -p nas-csi-host-agent -- render \
 cargo run -p nas-csi-host-agent -- apply \
   --config .nas-csi/host.yaml \
   --artifact-dir .nas-csi/rendered
+
+cargo run -p nas-csi-host-agent -- status \
+  --config .nas-csi/host.yaml
 ```
 
 Generated `.nas-csi` files are host-local state and ignored by git. `apply` is
-dry-run unless `--execute` is passed.
+dry-run unless `--execute` is passed. Execute refuses unsafe plans, validates
+base image existence/format/SHA-256 before root disk creation, grows but never
+shrinks root disks, waits for managed virtiofs sockets, and refuses to manage
+unmarked libvirt domains unless adoption is explicitly enabled.
 
 ## Documentation
 

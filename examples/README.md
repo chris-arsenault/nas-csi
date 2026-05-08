@@ -19,3 +19,7 @@ These examples intentionally omit host-specific facts and application workloads.
 The setup flow discovers TrueNAS, libvirt, network, storage, image, and dataset
 details on the target host, then writes a local desired-state file outside this
 repo.
+
+The sample image checksum is a placeholder fixture. A real local selection file
+must use the SHA-256 of the selected base cloud image before `apply --execute`
+will create root disk overlays.

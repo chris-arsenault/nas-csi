@@ -9,6 +9,7 @@ libvirt:
 
 image:
   source: /mnt/tank/nas-csi/images/debian-12-genericcloud-amd64.qcow2
+  checksum: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 datasets:
   imageCache: tank/nas-csi/images

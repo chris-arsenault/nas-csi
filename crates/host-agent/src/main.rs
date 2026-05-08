@@ -3,15 +3,18 @@ use clap::{Parser, Subcommand};
 use nas_csi_types::{
     ClusterIntent, DiscoveryInventory, HostConfig, HostConfigDraft, HostSelections,
 };
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Parser)]
 #[command(name = "nas-csi-host-agent")]
@@ -75,6 +78,8 @@ enum Command {
         systemd_unit_dir: PathBuf,
         #[arg(long)]
         allow_running_domain_redefine: bool,
+        #[arg(long)]
+        allow_domain_adoption: bool,
         #[arg(long)]
         execute: bool,
     },
@@ -168,6 +173,7 @@ fn main() -> Result<()> {
             artifact_dir,
             systemd_unit_dir,
             allow_running_domain_redefine,
+            allow_domain_adoption,
             execute,
         } => {
             let config = load_yaml::<HostConfig>(&config)?;
@@ -179,6 +185,7 @@ fn main() -> Result<()> {
                 &artifact_dir,
                 &systemd_unit_dir,
                 allow_running_domain_redefine,
+                allow_domain_adoption,
             );
             let plan =
                 nas_csi_vm_manager::plan_host_apply(&config, &render_options, &apply_options)?;
@@ -207,7 +214,7 @@ fn main() -> Result<()> {
             report_validation("host config", config.validate())?;
             let runner = RealCommandRunner;
             let apply_options =
-                apply_options_from_config(&config, &artifact_dir, &systemd_unit_dir, false);
+                apply_options_from_config(&config, &artifact_dir, &systemd_unit_dir, false, false);
             let actual = inspect_status_state(&config, &apply_options, &runner)?;
             print_host_status(&config, &apply_options, &actual);
             Ok(())
@@ -358,6 +365,7 @@ fn apply_options_from_config(
     artifact_dir: &Path,
     systemd_unit_dir: &Path,
     allow_running_domain_redefine: bool,
+    allow_domain_adoption: bool,
 ) -> nas_csi_vm_manager::HostApplyPlanOptions {
     nas_csi_vm_manager::HostApplyPlanOptions {
         artifact_dir: artifact_dir.display().to_string(),
@@ -366,6 +374,7 @@ fn apply_options_from_config(
         virsh_path: config.host_tools.virsh.clone(),
         systemctl_path: config.host_tools.systemctl.clone(),
         allow_running_domain_redefine,
+        allow_domain_adoption,
         ..nas_csi_vm_manager::HostApplyPlanOptions::default()
     }
 }
@@ -435,6 +444,7 @@ fn is_risky_operation(operation: &nas_csi_vm_manager::ReconcileOperation) -> boo
     matches!(
         operation,
         nas_csi_vm_manager::ReconcileOperation::CreateRootDisk { .. }
+            | nas_csi_vm_manager::ReconcileOperation::ResizeRootDisk { .. }
             | nas_csi_vm_manager::ReconcileOperation::RewriteSeedImage { .. }
             | nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService { .. }
             | nas_csi_vm_manager::ReconcileOperation::DefineDomain { .. }
@@ -476,16 +486,37 @@ fn print_reconcile_operation(operation: &nas_csi_vm_manager::ReconcileOperation)
             println!("   creates: {}", shell_quote(path));
             println!("   command: {command}");
         }
-        nas_csi_vm_manager::ReconcileOperation::ReloadSystemdUnits { command }
-        | nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService {
-            command, ..
+        nas_csi_vm_manager::ReconcileOperation::ResizeRootDisk {
+            path,
+            desired_size_bytes,
+            command,
+        } => {
+            println!(
+                "   resize {} to {} bytes",
+                shell_quote(path),
+                desired_size_bytes
+            );
+            println!("   command: {command}");
         }
-        | nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService { command, .. }
+        nas_csi_vm_manager::ReconcileOperation::ReloadSystemdUnits { command }
         | nas_csi_vm_manager::ReconcileOperation::DefineDomain { command, .. }
         | nas_csi_vm_manager::ReconcileOperation::RedefineDomain { command, .. }
         | nas_csi_vm_manager::ReconcileOperation::EnableDomainAutostart { command, .. }
         | nas_csi_vm_manager::ReconcileOperation::StartDomain { command, .. } => {
             println!("   command: {command}");
+        }
+        nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService {
+            socket_path,
+            command,
+            ..
+        }
+        | nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService {
+            socket_path,
+            command,
+            ..
+        } => {
+            println!("   command: {command}");
+            println!("   wait for socket: {}", shell_quote(socket_path));
         }
         nas_csi_vm_manager::ReconcileOperation::RedefineDomainRequiresShutdown {
             domain,
@@ -612,15 +643,25 @@ fn execute_reconcile_operation(
             write_binary_atomic_if_changed(path, contents)?;
         }
         nas_csi_vm_manager::ReconcileOperation::CreateRootDisk { command, .. }
+        | nas_csi_vm_manager::ReconcileOperation::ResizeRootDisk { command, .. }
         | nas_csi_vm_manager::ReconcileOperation::ReloadSystemdUnits { command }
-        | nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService {
-            command, ..
-        }
-        | nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService { command, .. }
         | nas_csi_vm_manager::ReconcileOperation::DefineDomain { command, .. }
         | nas_csi_vm_manager::ReconcileOperation::EnableDomainAutostart { command, .. }
         | nas_csi_vm_manager::ReconcileOperation::StartDomain { command, .. } => {
             runner.run(command)?;
+        }
+        nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService {
+            socket_path,
+            command,
+            ..
+        }
+        | nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService {
+            socket_path,
+            command,
+            ..
+        } => {
+            runner.run(command)?;
+            wait_for_virtiofs_socket(socket_path)?;
         }
         nas_csi_vm_manager::ReconcileOperation::RedefineDomain {
             domain,
@@ -678,6 +719,13 @@ fn inspect_actual_state(
             }
         }
     }
+    for node in &config.nodes {
+        if let Some(source_image) = &node.root_disk.source_image {
+            actual
+                .paths
+                .insert(source_image.clone(), inspect_path(source_image)?);
+        }
+    }
 
     for program in command_programs {
         actual.tools.insert(program.clone(), inspect_tool(&program));
@@ -702,6 +750,26 @@ fn inspect_actual_state(
             && let Some(image) = inspect_qemu_image(runner, &command.program, path)?
         {
             actual.qemu_images.insert(path.clone(), image);
+        }
+    }
+    if actual
+        .tools
+        .get(&apply_options.qemu_img_path)
+        .map(nas_csi_vm_manager::ToolActualState::is_found)
+        .unwrap_or(false)
+    {
+        for node in &config.nodes {
+            if let Some(source_image) = &node.root_disk.source_image
+                && actual
+                    .paths
+                    .get(source_image)
+                    .map(nas_csi_vm_manager::PathActualState::exists)
+                    .unwrap_or(false)
+                && let Some(image) =
+                    inspect_qemu_image(runner, &apply_options.qemu_img_path, source_image)?
+            {
+                actual.qemu_images.insert(source_image.clone(), image);
+            }
         }
     }
 
@@ -794,6 +862,11 @@ fn inspect_status_state(
         actual
             .paths
             .insert(seed_path.clone(), inspect_path(&seed_path)?);
+        if let Some(source_image) = &node.root_disk.source_image {
+            actual
+                .paths
+                .insert(source_image.clone(), inspect_path(source_image)?);
+        }
     }
 
     if actual
@@ -814,6 +887,17 @@ fn inspect_status_state(
                 actual
                     .qemu_images
                     .insert(node.root_disk.image.clone(), image);
+            }
+            if let Some(source_image) = &node.root_disk.source_image
+                && actual
+                    .paths
+                    .get(source_image)
+                    .map(nas_csi_vm_manager::PathActualState::exists)
+                    .unwrap_or(false)
+                && let Some(image) =
+                    inspect_qemu_image(runner, &apply_options.qemu_img_path, source_image)?
+            {
+                actual.qemu_images.insert(source_image.clone(), image);
             }
         }
     }
@@ -976,9 +1060,10 @@ fn print_host_status(
     for node in &config.nodes {
         let domain = actual.domains.get(&node.domain);
         println!(
-            "- {}: exists={} active={} autostart={} desiredHash={} xmlHash={}",
+            "- {}: exists={} managed={} active={} autostart={} desiredHash={} xmlHash={}",
             node.domain,
             domain.map(|domain| domain.exists).unwrap_or(false),
+            domain.map(|domain| domain.managed).unwrap_or(false),
             domain.map(|domain| domain.active).unwrap_or(false),
             optional_bool_label(domain.and_then(|domain| domain.autostart)),
             domain
@@ -1032,6 +1117,11 @@ fn parent_dir_for_path(path: &str) -> String {
         .unwrap_or_else(|| ".".to_string())
 }
 
+fn sha256_hex(contents: &[u8]) -> String {
+    let digest = Sha256::digest(contents);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[derive(serde::Deserialize)]
 struct QemuImgInfo {
     #[serde(default)]
@@ -1078,12 +1168,18 @@ fn inspect_path(path: &str) -> Result<nas_csi_vm_manager::PathActualState> {
     }
     if metadata.is_file() {
         let contents = fs::read(path_obj).with_context(|| format!("failed to read {path}"))?;
-        return Ok(nas_csi_vm_manager::PathActualState::file(&contents));
+        return Ok(nas_csi_vm_manager::PathActualState {
+            kind: nas_csi_vm_manager::PathActualKind::File,
+            size: Some(contents.len() as u64),
+            content_hash: Some(nas_csi_vm_manager::content_hash(&contents)),
+            sha256: Some(sha256_hex(&contents)),
+        });
     }
     Ok(nas_csi_vm_manager::PathActualState {
         kind: nas_csi_vm_manager::PathActualKind::Other,
         size: Some(metadata.len()),
         content_hash: None,
+        sha256: None,
     })
 }
 
@@ -1119,6 +1215,7 @@ fn inspect_domain(
     if !exists {
         return Ok(nas_csi_vm_manager::DomainActualState {
             exists: false,
+            managed: false,
             active: false,
             autostart: None,
             desired_hash: None,
@@ -1135,12 +1232,17 @@ fn inspect_domain(
     let desired_hash = xml
         .as_deref()
         .and_then(nas_csi_vm_manager::extract_domain_desired_hash);
+    let managed = xml
+        .as_deref()
+        .map(nas_csi_vm_manager::extract_domain_managed)
+        .unwrap_or(false);
     let xml_hash = xml
         .as_ref()
         .map(|xml| nas_csi_vm_manager::content_hash(xml.as_bytes()));
 
     Ok(nas_csi_vm_manager::DomainActualState {
         exists,
+        managed,
         active,
         autostart,
         desired_hash,
@@ -1256,6 +1358,7 @@ struct ExecuteSafety {
     allowed_root_dirs: BTreeSet<PathBuf>,
     allowed_root_disks: BTreeSet<PathBuf>,
     allowed_seed_images: BTreeSet<PathBuf>,
+    allowed_virtiofs_sockets: BTreeSet<PathBuf>,
     allowed_domains: BTreeSet<String>,
 }
 
@@ -1271,6 +1374,7 @@ impl ExecuteSafety {
         let mut allowed_root_dirs = BTreeSet::new();
         let mut allowed_root_disks = BTreeSet::new();
         let mut allowed_seed_images = BTreeSet::new();
+        let mut allowed_virtiofs_sockets = BTreeSet::new();
         let mut allowed_domains = BTreeSet::new();
 
         for node in &config.nodes {
@@ -1291,6 +1395,14 @@ impl ExecuteSafety {
                     "{}.service",
                     nas_csi_vm_manager::virtiofsd_service_name(&node.domain, export_id)
                 ));
+                allowed_virtiofs_sockets.insert(checked_path(
+                    &nas_csi_vm_manager::virtiofs_socket_path(
+                        &render_options_from_config(config),
+                        &node.domain,
+                        export_id,
+                    ),
+                    "virtiofs socket",
+                )?);
             }
         }
 
@@ -1301,6 +1413,7 @@ impl ExecuteSafety {
             allowed_root_dirs,
             allowed_root_disks,
             allowed_seed_images,
+            allowed_virtiofs_sockets,
             allowed_domains,
         })
     }
@@ -1330,6 +1443,11 @@ impl ExecuteSafety {
                 self.require_exact(&path, &self.allowed_root_disks, "root disk")?;
                 require_command_mentions_path(command, path.to_string_lossy().as_ref())
             }
+            nas_csi_vm_manager::ReconcileOperation::ResizeRootDisk { path, command, .. } => {
+                let path = checked_path(path, "root disk")?;
+                self.require_exact(&path, &self.allowed_root_disks, "root disk")?;
+                require_command_mentions_path(command, path.to_string_lossy().as_ref())
+            }
             nas_csi_vm_manager::ReconcileOperation::RewriteSeedImage { path, .. } => {
                 let path = checked_path(path, "seed image")?;
                 self.require_exact(&path, &self.allowed_seed_images, "seed image")
@@ -1342,11 +1460,22 @@ impl ExecuteSafety {
             nas_csi_vm_manager::ReconcileOperation::ReloadSystemdUnits { .. } => Ok(()),
             nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService {
                 unit_name,
+                socket_path,
                 ..
             }
             | nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService {
-                unit_name, ..
-            } => self.require_systemd_unit(unit_name),
+                unit_name,
+                socket_path,
+                ..
+            } => {
+                self.require_systemd_unit(unit_name)?;
+                let socket_path = checked_path(socket_path, "virtiofs socket")?;
+                self.require_exact(
+                    &socket_path,
+                    &self.allowed_virtiofs_sockets,
+                    "virtiofs socket",
+                )
+            }
             nas_csi_vm_manager::ReconcileOperation::DefineDomain {
                 domain,
                 xml_path,
@@ -1442,6 +1571,7 @@ impl ExecuteSafety {
             allowed_root_dirs: BTreeSet::new(),
             allowed_root_disks: BTreeSet::new(),
             allowed_seed_images: BTreeSet::new(),
+            allowed_virtiofs_sockets: BTreeSet::new(),
             allowed_domains: BTreeSet::new(),
         }
     }
@@ -1455,6 +1585,13 @@ impl ExecuteSafety {
     #[cfg(test)]
     fn allow_domain(mut self, domain: &str) -> Self {
         self.allowed_domains.insert(domain.to_string());
+        self
+    }
+
+    #[cfg(test)]
+    fn allow_virtiofs_socket(mut self, socket_path: &Path) -> Self {
+        self.allowed_virtiofs_sockets
+            .insert(socket_path.to_path_buf());
         self
     }
 }
@@ -1763,6 +1900,30 @@ fn sync_directory(path: &Path) -> Result<()> {
     }
 }
 
+fn wait_for_virtiofs_socket(path: &str) -> Result<()> {
+    if path.is_empty() {
+        anyhow::bail!("virtiofs socket path is empty");
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.file_type().is_socket() => return Ok(()),
+            Ok(_) => anyhow::bail!("{path} exists but is not a Unix socket"),
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect virtiofs socket {path}"));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for virtiofs socket {path}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1772,6 +1933,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::os::unix::net::UnixListener;
 
     #[derive(Default)]
     struct FakeCommandRunner {
@@ -2118,6 +2280,42 @@ mod tests {
 
         assert!(error.to_string().contains("unclassified command"));
         assert!(runner.status_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn execute_virtiofs_service_waits_for_socket() {
+        let root = unique_test_dir("virtiofs-socket");
+        let socket_path = root.join("repos.sock");
+        let _listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+        let command = nas_csi_vm_manager::CommandSpec::new(
+            "/usr/bin/systemctl",
+            [
+                "enable".to_string(),
+                "--now".to_string(),
+                "nascsi-virtiofsd-test.service".to_string(),
+            ],
+        );
+        let runner = FakeCommandRunner::default().with_status(&command, true);
+        let plan = nas_csi_vm_manager::HostReconcilePlan {
+            steps: vec![nas_csi_vm_manager::ReconcileStep {
+                description: "start virtiofsd".to_string(),
+                kind: nas_csi_vm_manager::ReconcileStepKind::Apply(
+                    nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService {
+                        unit_name: "nascsi-virtiofsd-test.service".to_string(),
+                        socket_path: socket_path.display().to_string(),
+                        command: command.clone(),
+                    },
+                ),
+            }],
+        };
+        let safety = ExecuteSafety::for_test(&root.join("artifacts"), &root.join("systemd"))
+            .allow_systemd_unit("nascsi-virtiofsd-test.service")
+            .allow_virtiofs_socket(&socket_path);
+
+        execute_reconcile_plan(&plan, &runner, &safety).expect("execute");
+
+        assert_eq!(runner.status_calls.borrow().as_slice(), &[command]);
+        let _ = fs::remove_dir_all(root);
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

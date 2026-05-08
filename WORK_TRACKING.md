@@ -20,16 +20,16 @@ slice. Verification work is intentionally excluded here.
 
 ## 2. VM And Runtime
 
-1. [ ] Validate base image existence before root disk creation.
-2. [ ] Validate base image format before root disk creation.
-3. [ ] Validate base image checksum before root disk creation.
-4. [ ] Add root disk resize handling for existing disks smaller than desired.
-5. [ ] Add virtiofsd socket readiness checks after service start or restart.
-6. [ ] Add libvirt domain ownership checks using `nas-csi` metadata.
-7. [ ] Refuse to manage domains without `nas-csi` metadata unless an explicit
+1. [x] Validate base image existence before root disk creation.
+2. [x] Validate base image format before root disk creation.
+3. [x] Validate base image checksum before root disk creation.
+4. [x] Add root disk resize handling for existing disks smaller than desired.
+5. [x] Add virtiofsd socket readiness checks after service start or restart.
+6. [x] Add libvirt domain ownership checks using `nas-csi` metadata.
+7. [x] Refuse to manage domains without `nas-csi` metadata unless an explicit
    adoption path is enabled.
-8. [ ] Add stopped-domain redefine flow.
-9. [ ] Keep redefined VMs stopped unless a separate start policy is enabled.
+8. [x] Add stopped-domain redefine flow.
+9. [x] Keep redefined VMs stopped unless a separate start policy is enabled.
 
 ## 3. Host Agent Ownership
 

@@ -92,6 +92,7 @@ nodes:
       image: <generated-node-root-disk>
       sourceImage: <selected-cloud-image>
       sourceFormat: qcow2
+      sourceChecksum: sha256:<selected-cloud-image-sha256>
       sizeGib: <derived-or-selected-size>
       format: qcow2
     cloudInit:
@@ -213,11 +214,13 @@ typed plan currently covers:
 - running `virsh define` and `virsh autostart`.
 
 The reconciler skips files and seed images that already match by content hash,
-validates existing root disk overlays with `qemu-img info`, restarts active
-virtiofsd services when their installed unit content changes, and compares
-libvirt domains through a `nas-csi` metadata hash instead of raw `virsh dumpxml`
-bytes. Raw libvirt XML is not stable enough for equality because libvirt expands
-definitions after `virsh define`.
+validates base image existence, format, and SHA-256 before root disk creation,
+validates existing root disk overlays with `qemu-img info`, plans safe root disk
+growth with `qemu-img resize`, restarts active virtiofsd services when their
+installed unit content changes, waits for their Unix sockets after start or
+restart, and compares libvirt domains through `nas-csi` metadata instead of raw
+`virsh dumpxml` bytes. Raw libvirt XML is not stable enough for equality because
+libvirt expands definitions after `virsh define`.
 
 The reconcile diff is intentionally typed. It uses named operations such as
 `CreateRootDisk`, `RewriteSeedImage`, `InstallOrUpdateSystemdUnit`,
@@ -231,6 +234,11 @@ VM start is still excluded from the default CLI path, but the planner has a
 state-aware `start_domains` option for the future execute policy. If enabled, it
 skips domains that are already running and starts only stopped or missing ones
 after the define/autostart steps are safe.
+
+Existing libvirt domains must carry `nas-csi` metadata before reconcile will
+manage them. An unmanaged domain with the same name is refused unless an
+explicit adoption option is enabled, and stopped-domain redefines remain stopped
+unless the separate start policy is enabled.
 
 ## K3s/Kubernetes Bootstrap
 

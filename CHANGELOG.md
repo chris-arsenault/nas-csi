@@ -20,6 +20,8 @@ process are still early.
 - Named reconcile operations for root disks, seed images, systemd units,
   virtiofsd restarts, and libvirt domain definition changes.
 - Host-agent command runner abstraction with fake-runner test coverage.
+- Execute safety checks for base image SHA-256/format validation, root disk
+  growth, virtiofs socket readiness, and libvirt domain ownership/adoption.
 - Discovered host tool paths in generated `HostConfig.hostTools`.
 - Initial documentation set covering architecture, VM ownership, k3s lifecycle,
   discovery, configuration, research, and operational runbooks.

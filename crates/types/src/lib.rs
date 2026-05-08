@@ -594,6 +594,11 @@ impl HostConfig {
             if node.memory_mib == 0 {
                 errors.push(format!("node {} must have memoryMiB > 0", node.name));
             }
+            validate_optional_sha256(
+                &mut errors,
+                &format!("nodes.{}.rootDisk.sourceChecksum", node.name),
+                node.root_disk.source_checksum.as_deref(),
+            );
             match node.role {
                 NodeRole::Server => server_count += 1,
                 NodeRole::Agent => agent_count += 1,
@@ -674,6 +679,11 @@ impl HostSelections {
         );
         push_non_empty(&mut errors, "libvirt.bridge", &self.libvirt.bridge);
         push_non_empty(&mut errors, "image.source", &self.image.source);
+        validate_optional_sha256(
+            &mut errors,
+            "image.checksum",
+            self.image.checksum.as_deref(),
+        );
         push_non_empty(
             &mut errors,
             "datasets.imageCache",
@@ -732,6 +742,8 @@ pub struct HostLibvirtSelection {
 #[serde(rename_all = "camelCase")]
 pub struct ImageSelection {
     pub source: String,
+    #[serde(default)]
+    pub checksum: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1001,6 +1013,8 @@ pub struct RootDiskConfig {
     pub source_image: Option<String>,
     #[serde(default)]
     pub source_format: Option<DiskFormat>,
+    #[serde(default)]
+    pub source_checksum: Option<String>,
     pub size_gib: u64,
     pub format: DiskFormat,
 }
@@ -1088,6 +1102,7 @@ fn node_config_from_selection(
             ),
             source_image: Some(selections.image.source.clone()),
             source_format: Some(DiskFormat::Qcow2),
+            source_checksum: selections.image.checksum.clone(),
             size_gib: size.root_disk_size_gib,
             format: DiskFormat::Qcow2,
         },
@@ -1166,6 +1181,19 @@ fn validate_node_size(errors: &mut Vec<String>, field: &str, size: NodeSizeSelec
     }
     if size.root_disk_size_gib == 0 {
         errors.push(format!("{field}.rootDiskSizeGib must be greater than zero"));
+    }
+}
+
+fn validate_optional_sha256(errors: &mut Vec<String>, field: &str, checksum: Option<&str>) {
+    let Some(checksum) = checksum else {
+        return;
+    };
+    let checksum = checksum
+        .trim()
+        .strip_prefix("sha256:")
+        .unwrap_or_else(|| checksum.trim());
+    if checksum.len() != 64 || !checksum.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        errors.push(format!("{field} must be a sha256:<64-hex> or 64-hex value"));
     }
 }
 
@@ -1468,6 +1496,7 @@ mod tests {
                         image: "image.qcow2".to_string(),
                         source_image: None,
                         source_format: None,
+                        source_checksum: None,
                         size_gib: 80,
                         format: DiskFormat::Qcow2,
                     },
@@ -1495,6 +1524,7 @@ mod tests {
                         image: "image.qcow2".to_string(),
                         source_image: None,
                         source_format: None,
+                        source_checksum: None,
                         size_gib: 80,
                         format: DiskFormat::Qcow2,
                     },
@@ -1572,6 +1602,7 @@ mod tests {
                 image: "image.qcow2".to_string(),
                 source_image: None,
                 source_format: None,
+                source_checksum: None,
                 size_gib: 80,
                 format: DiskFormat::Qcow2,
             },
@@ -1682,6 +1713,7 @@ mod tests {
             },
             image: ImageSelection {
                 source: "/mnt/tank/nas-csi/images/debian.qcow2".to_string(),
+                checksum: None,
             },
             datasets: HostDatasetSelections {
                 image_cache: "tank/nas-csi/images".to_string(),
