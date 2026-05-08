@@ -7,10 +7,26 @@ use std::path::PathBuf;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = arg_value("--endpoint").unwrap_or_else(|| "/csi/csi.sock".to_string());
     let config = arg_value("--config").unwrap_or_else(|| "/etc/nas-csi/node.yaml".to_string());
-    let runtime = load_node_runtime_config(&PathBuf::from(config))?;
+    let runtime = load_node_runtime_config(&PathBuf::from(&config))?;
+    log_startup(&endpoint, &config, &runtime.node_name);
     let service = NasCsiNodeService::new(runtime, RealNodeMounter);
     serve_node_uds(&PathBuf::from(endpoint), service).await?;
     Ok(())
+}
+
+fn log_startup(endpoint: &str, config: &str, node_name: &str) {
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "event": "startup",
+            "component": "nas-csi-node",
+            "mode": "node",
+            "driverName": "nas-csi.dev",
+            "endpoint": endpoint,
+            "configPath": config,
+            "nodeName": node_name,
+        })
+    );
 }
 
 fn arg_value(name: &str) -> Option<String> {

@@ -69,6 +69,11 @@ contains guest bootstrap data for:
 - `/etc/nas-csi/node.yaml`;
 - guest virtiofs fstab entries.
 
+The CSI install workflow refreshes `/etc/nas-csi/node.yaml` through the qemu
+guest agent before verifying Kubernetes node-plugin behavior. Cloud-init remains
+the bootstrap path; the installer is the reconciliation path for current
+host-local export state.
+
 The implementation avoids external image tools such as `genisoimage` or
 `cloud-localds`.
 

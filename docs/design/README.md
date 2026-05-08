@@ -6,6 +6,8 @@ manifest objects live in code and deploy assets.
 
 - [Architecture](architecture.md): storage model, data path, control path, CSI
   surface, and correctness boundaries.
+- [Deployment scope](scope.md): first-deploy rules, real workload scope, and
+  non-goals.
 - [VM management](vm-management.md): IaC-owned node VM lifecycle, images,
   cloud-init, libvirt domains, and reconciliation.
 - [Cluster management](cluster-management.md): k3s bootstrap, node join,

@@ -56,7 +56,8 @@ Work:
 - run repository workloads such as `git status`, install, and clean build;
 - test SMB-side edits while the VM observes the same tree;
 - verify read-only policy prevents Kubernetes-side mutation;
-- capture `virtiofsd` resource use and failure modes.
+- capture `virtiofsd` resource use and failure modes through
+  `workload validate`.
 
 Exit criteria:
 
@@ -108,17 +109,22 @@ Exit criteria:
 
 ## Milestone 5: Controller Backend Hardening
 
-Goal: replace in-memory controller state with durable TrueNAS-backed behavior.
+Goal: replace startup-empty controller state with durable, explicitly
+configured TrueNAS-backed behavior.
 
 Work:
 
-- implement production TrueNAS transport with authentication and retry policy;
-- choose a durable metadata location for driver-owned volume state;
-- wire `CreateVolume` existing-dataset registration to discovery/API lookups;
+- load controller config from `/etc/nas-csi/controller.yaml`;
+- use `/var/lib/nas-csi/controller/state.json` for controller-owned identity;
+- use TrueNAS JSON-RPC over WebSocket with API-key authentication, timeouts,
+  and bounded reconnect attempts;
+- register existing datasets through TrueNAS dataset, SMB, and snapshot
+  lookups;
 - wire optional dynamic dataset creation to TrueNAS API calls;
-- implement authoritative delete safety with explicit opt-in;
-- map SMB share metadata and snapshot metadata from TrueNAS records;
-- add integration tests with a fake TrueNAS API state machine.
+- keep dataset deletion behind both controller configuration and per-volume
+  opt-in;
+- test registration, restart persistence, snapshots, SMB metadata, and delete
+  safety with a fake TrueNAS backend.
 
 Exit criteria:
 

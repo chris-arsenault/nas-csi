@@ -37,8 +37,11 @@ Kubernetes-native drain/cordon commands and host-agent status checks.
 1. Capture `status`, `health`, and `cluster status` output.
 2. Cordon and drain the node with `kubectl`.
 3. Stop or restart the VM using the current host/operator mechanism.
-4. Run host `apply --execute` if VM/runtime desired state must be repaired.
-5. Run `cluster apply --execute` if k3s join or labels/taints must be repaired.
+4. Run `host-install --post-reboot-check` if VM/runtime state should already be
+   present, or host `apply --execute` if VM/runtime desired state must be
+   repaired.
+5. Run `cluster install --execute` if k3s join, labels, taints, or substrate
+   manifests must be repaired.
 6. Wait for the Kubernetes node to become Ready.
 7. Verify `nas-csi-node` is running on the node.
 8. Smoke test CSI staging for the affected dataset policy.

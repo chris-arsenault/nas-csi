@@ -1994,7 +1994,7 @@ fn k3s_config_for_node(
     })
 }
 
-fn node_runtime_config(
+pub fn render_node_runtime_config(
     config: &HostConfig,
     node: &NodeConfig,
 ) -> Result<String, ArtifactRenderError> {
@@ -2027,6 +2027,13 @@ fn node_runtime_config(
         exports,
     };
     serde_yml::to_string(&runtime).map_err(ArtifactRenderError::Yaml)
+}
+
+fn node_runtime_config(
+    config: &HostConfig,
+    node: &NodeConfig,
+) -> Result<String, ArtifactRenderError> {
+    render_node_runtime_config(config, node)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2073,7 +2080,7 @@ fn render_virtiofs_fstab(mounts: &[GuestVirtiofsMount]) -> String {
     output
 }
 
-fn guest_virtiofs_mount_path(export_id: &str) -> String {
+pub fn guest_virtiofs_mount_path(export_id: &str) -> String {
     format!("/var/lib/nas-csi/virtiofs/{}", safe_path_segment(export_id))
 }
 

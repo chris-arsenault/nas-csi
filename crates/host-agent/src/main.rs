@@ -7,8 +7,8 @@ use nas_csi_cluster_manager::{
     GuestCommandSpec,
 };
 use nas_csi_types::{
-    ClusterIntent, DiscoveryInventory, HostConfig, HostConfigDraft, HostSelections, NodeRole,
-    NodeTaint,
+    AccessMode, ClusterIntent, DiscoveryInventory, HostConfig, HostConfigDraft, HostSelections,
+    NodeConfig, NodeRole, NodeTaint,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -110,10 +110,47 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run first-host installation workflow: discover, materialize, apply, and verify.
+    HostInstall {
+        #[arg(long)]
+        intent: Option<PathBuf>,
+        #[arg(long)]
+        selections: Option<PathBuf>,
+        #[arg(long, default_value = "/etc/nas-csi/discovery.yaml")]
+        discovery: PathBuf,
+        #[arg(long, default_value = "/etc/nas-csi/host.yaml")]
+        config: PathBuf,
+        #[arg(long, default_value = "/var/lib/nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "/etc/systemd/system")]
+        systemd_unit_dir: PathBuf,
+        #[arg(long)]
+        allow_running_domain_redefine: bool,
+        #[arg(long)]
+        allow_domain_adoption: bool,
+        #[arg(long)]
+        no_start_domains: bool,
+        #[arg(long, default_value_t = 600)]
+        guest_agent_timeout_seconds: u64,
+        #[arg(long)]
+        post_reboot_check: bool,
+        #[arg(long)]
+        execute: bool,
+    },
     /// Plan, apply, or inspect host-agent-owned k3s cluster substrate.
     Cluster {
         #[command(subcommand)]
         command: ClusterCommand,
+    },
+    /// Install and verify static existing-dataset CSI volumes.
+    Csi {
+        #[command(subcommand)]
+        command: CsiCommand,
+    },
+    /// Validate real repo and read-only content workloads against static CSI volumes.
+    Workload {
+        #[command(subcommand)]
+        command: WorkloadCommand,
     },
 }
 
@@ -153,6 +190,84 @@ enum ClusterCommand {
         manifest_root: PathBuf,
         #[arg(long, default_value = "kubectl")]
         kubectl: String,
+    },
+    /// Run first-cluster installation workflow: plan, apply, and verify substrate.
+    Install {
+        #[arg(long, default_value = "/etc/nas-csi/host.yaml")]
+        config: PathBuf,
+        #[arg(long, default_value = "/var/lib/nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "/usr/local/share/nas-csi/deploy")]
+        manifest_root: PathBuf,
+        #[arg(long, default_value = "kubectl")]
+        kubectl: String,
+        #[arg(long)]
+        reboot_node: Option<String>,
+        #[arg(long)]
+        post_reboot_check: bool,
+        #[arg(long, default_value_t = 600)]
+        wait_timeout_seconds: u64,
+        #[arg(long)]
+        execute: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CsiCommand {
+    /// Install node runtime config, static PV/PVCs, and smoke-test existing datasets.
+    Install {
+        #[arg(long, default_value = "/etc/nas-csi/host.yaml")]
+        config: PathBuf,
+        #[arg(long, default_value = "/var/lib/nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "/usr/local/share/nas-csi/deploy")]
+        manifest_root: PathBuf,
+        #[arg(long, default_value = "kubectl")]
+        kubectl: String,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        #[arg(long, default_value = "busybox:1.36")]
+        smoke_image: String,
+        #[arg(long, default_value_t = 600)]
+        wait_timeout_seconds: u64,
+        #[arg(long)]
+        execute: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkloadCommand {
+    /// Run repo/content workload validation and record virtiofs coherency observations.
+    Validate {
+        #[arg(long, default_value = "/etc/nas-csi/host.yaml")]
+        config: PathBuf,
+        #[arg(long, default_value = "/var/lib/nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "kubectl")]
+        kubectl: String,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        /// Export id for repository workload validation. Defaults to the first read-write export.
+        #[arg(long)]
+        repo_export: Option<String>,
+        /// Export id for read-only streaming validation. Defaults to the first read-only export.
+        #[arg(long)]
+        content_export: Option<String>,
+        #[arg(long, default_value = "node:22-bookworm")]
+        repo_image: String,
+        #[arg(long, default_value = "busybox:1.36")]
+        content_image: String,
+        #[arg(long, default_value = "httpd -f -p 8080 -h /content")]
+        content_command: String,
+        #[arg(long, default_value_t = 600)]
+        wait_timeout_seconds: u64,
+        #[arg(long, default_value_t = 200)]
+        small_file_count: u32,
+        /// Leave validation pods running for manual inspection instead of deleting them on success.
+        #[arg(long)]
+        keep_pods: bool,
+        #[arg(long)]
+        execute: bool,
     },
 }
 
@@ -307,6 +422,39 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::HostInstall {
+            intent,
+            selections,
+            discovery,
+            config,
+            artifact_dir,
+            systemd_unit_dir,
+            allow_running_domain_redefine,
+            allow_domain_adoption,
+            no_start_domains,
+            guest_agent_timeout_seconds,
+            post_reboot_check,
+            execute,
+        } => {
+            let runner = RealCommandRunner;
+            run_host_install(
+                HostInstallOptions {
+                    intent,
+                    selections,
+                    discovery,
+                    config,
+                    artifact_dir,
+                    systemd_unit_dir,
+                    allow_running_domain_redefine,
+                    allow_domain_adoption,
+                    start_domains: !no_start_domains,
+                    guest_agent_timeout: Duration::from_secs(guest_agent_timeout_seconds),
+                    post_reboot_check,
+                    execute,
+                },
+                &runner,
+            )
+        }
         Command::Cluster { command } => match command {
             ClusterCommand::Plan {
                 config,
@@ -323,6 +471,7 @@ fn main() -> Result<()> {
                 let plan = nas_csi_cluster_manager::plan_cluster_reconcile(
                     &config, &options, &actual, &manifests,
                 );
+                log_cluster_reconcile_decisions(&plan);
                 print_cluster_reconcile_plan(&plan);
                 Ok(())
             }
@@ -342,6 +491,7 @@ fn main() -> Result<()> {
                 let plan = nas_csi_cluster_manager::plan_cluster_reconcile(
                     &config, &options, &actual, &manifests,
                 );
+                log_cluster_reconcile_decisions(&plan);
                 if execute {
                     execute_cluster_reconcile_plan(&plan, &options, &runner)
                 } else {
@@ -364,8 +514,2741 @@ fn main() -> Result<()> {
                 print_cluster_status(&config, &actual, &manifests);
                 Ok(())
             }
+            ClusterCommand::Install {
+                config,
+                artifact_dir,
+                manifest_root,
+                kubectl,
+                reboot_node,
+                post_reboot_check,
+                wait_timeout_seconds,
+                execute,
+            } => {
+                let config = load_yaml::<HostConfig>(&config)?;
+                report_validation("host config", config.validate())?;
+                let runner = RealCommandRunner;
+                run_cluster_install(
+                    &config,
+                    ClusterInstallOptions {
+                        artifact_dir,
+                        manifest_root,
+                        kubectl,
+                        reboot_node,
+                        post_reboot_check,
+                        wait_timeout: Duration::from_secs(wait_timeout_seconds),
+                        execute,
+                    },
+                    &runner,
+                )
+            }
+        },
+        Command::Csi { command } => match command {
+            CsiCommand::Install {
+                config,
+                artifact_dir,
+                manifest_root,
+                kubectl,
+                namespace,
+                smoke_image,
+                wait_timeout_seconds,
+                execute,
+            } => {
+                let config = load_yaml::<HostConfig>(&config)?;
+                report_validation("host config", config.validate())?;
+                let runner = RealCommandRunner;
+                run_csi_install(
+                    &config,
+                    CsiInstallOptions {
+                        artifact_dir,
+                        manifest_root,
+                        kubectl,
+                        namespace,
+                        smoke_image,
+                        wait_timeout: Duration::from_secs(wait_timeout_seconds),
+                        execute,
+                    },
+                    &runner,
+                )
+            }
+        },
+        Command::Workload { command } => match command {
+            WorkloadCommand::Validate {
+                config,
+                artifact_dir,
+                kubectl,
+                namespace,
+                repo_export,
+                content_export,
+                repo_image,
+                content_image,
+                content_command,
+                wait_timeout_seconds,
+                small_file_count,
+                keep_pods,
+                execute,
+            } => {
+                let config = load_yaml::<HostConfig>(&config)?;
+                report_validation("host config", config.validate())?;
+                let runner = RealCommandRunner;
+                run_workload_validation(
+                    &config,
+                    WorkloadValidationOptions {
+                        artifact_dir,
+                        kubectl,
+                        namespace,
+                        repo_export,
+                        content_export,
+                        repo_image,
+                        content_image,
+                        content_command,
+                        wait_timeout: Duration::from_secs(wait_timeout_seconds),
+                        small_file_count,
+                        keep_pods,
+                        execute,
+                    },
+                    &runner,
+                )
+            }
         },
     }
+}
+
+#[derive(Debug)]
+struct HostInstallOptions {
+    intent: Option<PathBuf>,
+    selections: Option<PathBuf>,
+    discovery: PathBuf,
+    config: PathBuf,
+    artifact_dir: PathBuf,
+    systemd_unit_dir: PathBuf,
+    allow_running_domain_redefine: bool,
+    allow_domain_adoption: bool,
+    start_domains: bool,
+    guest_agent_timeout: Duration,
+    post_reboot_check: bool,
+    execute: bool,
+}
+
+fn run_host_install(options: HostInstallOptions, runner: &impl CommandRunner) -> Result<()> {
+    if options.post_reboot_check {
+        let config = load_yaml::<HostConfig>(&options.config)?;
+        report_validation("host config", config.validate())?;
+        return run_host_install_post_reboot_check(&config, &options, runner);
+    }
+
+    let intent_path = options.intent.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("host-install requires --intent unless --post-reboot-check is used")
+    })?;
+    let selections_path = options.selections.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("host-install requires --selections unless --post-reboot-check is used")
+    })?;
+
+    println!("host-install: loading intent {}", intent_path.display());
+    let intent = load_yaml::<ClusterIntent>(intent_path)?;
+    report_validation("intent", intent.validate())?;
+
+    println!(
+        "host-install: loading selections {}",
+        selections_path.display()
+    );
+    let selections = load_yaml::<HostSelections>(selections_path)?;
+    report_validation("host selections", selections.validate())?;
+
+    println!("host-install: running read-only discovery");
+    let discovery = nas_csi_discovery::discover_local();
+    report_validation("discovery", discovery.validate())?;
+    write_yaml_atomic_if_changed(&options.discovery, &discovery)?;
+    println!(
+        "host-install: wrote discovery {}",
+        options.discovery.display()
+    );
+
+    println!("host-install: materializing host config");
+    let config = HostConfig::from_intent_discovery_selections(&intent, &discovery, &selections)
+        .map_err(|errors| validation_error("host config", errors))?;
+    write_yaml_atomic_if_changed(&options.config, &config)?;
+    println!("host-install: wrote config {}", options.config.display());
+
+    run_host_install_apply(&config, &options, runner)
+}
+
+fn run_host_install_apply(
+    config: &HostConfig,
+    options: &HostInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    let render_options = render_options_from_config(config);
+    let mut apply_options = apply_options_from_config(
+        config,
+        &options.artifact_dir,
+        &options.systemd_unit_dir,
+        options.allow_running_domain_redefine,
+        options.allow_domain_adoption,
+    );
+    apply_options.start_domains = options.start_domains;
+
+    let desired_apply =
+        nas_csi_vm_manager::plan_host_apply(config, &render_options, &apply_options)?;
+    let before_datasets = observe_datasets(config)?;
+    let actual = inspect_actual_state(config, &desired_apply, &apply_options, runner)?;
+    let reconcile_plan =
+        nas_csi_vm_manager::plan_host_reconcile(config, &render_options, &apply_options, &actual)?;
+    log_reconcile_decisions(&reconcile_plan);
+    print_reconcile_plan(&reconcile_plan);
+    verify_no_dataset_mutating_operations(config, &reconcile_plan)?;
+
+    if !options.execute {
+        println!("host-install: dry run only; pass --execute to apply changes");
+        return Ok(());
+    }
+
+    let _apply_lock = ApplyLock::acquire(&apply_lock_path(&options.artifact_dir))?;
+    let safety = ExecuteSafety::from_config(config, &apply_options)?;
+    execute_reconcile_plan(&reconcile_plan, runner, &safety)?;
+
+    if options.start_domains {
+        wait_for_all_guest_agents(
+            config,
+            &cluster_options_from_config(config, &options.artifact_dir, "kubectl"),
+            runner,
+            options.guest_agent_timeout,
+        )?;
+    }
+
+    let post_actual = inspect_status_state(config, &apply_options, runner)?;
+    print_host_status(config, &apply_options, &post_actual);
+    let health = build_health_report(config, &render_options, &post_actual)?;
+    print_health_report(&health);
+    verify_host_install_state(
+        config,
+        &desired_apply,
+        &apply_options,
+        &render_options,
+        &post_actual,
+        &health,
+        options.start_domains,
+    )?;
+    let after_datasets = observe_datasets(config)?;
+    verify_dataset_observations_stable(&before_datasets, &after_datasets)?;
+
+    let post_reconcile = nas_csi_vm_manager::plan_host_reconcile(
+        config,
+        &render_options,
+        &apply_options,
+        &post_actual,
+    )?;
+    verify_post_install_idempotence(&post_reconcile)?;
+
+    println!("host-install: completed host bring-up verification");
+    Ok(())
+}
+
+fn run_host_install_post_reboot_check(
+    config: &HostConfig,
+    options: &HostInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    println!(
+        "host-install: running post-reboot verification from {}",
+        options.config.display()
+    );
+
+    let render_options = render_options_from_config(config);
+    let mut apply_options = apply_options_from_config(
+        config,
+        &options.artifact_dir,
+        &options.systemd_unit_dir,
+        options.allow_running_domain_redefine,
+        options.allow_domain_adoption,
+    );
+    apply_options.start_domains = options.start_domains;
+    let desired_apply =
+        nas_csi_vm_manager::plan_host_apply(config, &render_options, &apply_options)?;
+    let actual = inspect_status_state(config, &apply_options, runner)?;
+    print_host_status(config, &apply_options, &actual);
+    let health = build_health_report(config, &render_options, &actual)?;
+    print_health_report(&health);
+
+    if options.start_domains {
+        wait_for_all_guest_agents(
+            config,
+            &cluster_options_from_config(config, &options.artifact_dir, "kubectl"),
+            runner,
+            options.guest_agent_timeout,
+        )?;
+    }
+
+    verify_host_install_state(
+        config,
+        &desired_apply,
+        &apply_options,
+        &render_options,
+        &actual,
+        &health,
+        options.start_domains,
+    )?;
+    let post_reconcile =
+        nas_csi_vm_manager::plan_host_reconcile(config, &render_options, &apply_options, &actual)?;
+    verify_post_install_idempotence(&post_reconcile)?;
+
+    println!("host-install: post-reboot verification passed");
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DatasetObservation {
+    source_path: String,
+    exists: bool,
+    mounted: bool,
+}
+
+fn observe_datasets(config: &HostConfig) -> Result<BTreeMap<String, DatasetObservation>> {
+    let mount_points = read_mount_points()?;
+    Ok(config
+        .exports
+        .iter()
+        .map(|(export_id, export)| {
+            (
+                export_id.clone(),
+                DatasetObservation {
+                    source_path: export.source_path.clone(),
+                    exists: Path::new(&export.source_path).exists(),
+                    mounted: mount_points.contains(&export.source_path),
+                },
+            )
+        })
+        .collect())
+}
+
+fn verify_dataset_observations_stable(
+    before: &BTreeMap<String, DatasetObservation>,
+    after: &BTreeMap<String, DatasetObservation>,
+) -> Result<()> {
+    if before == after {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "dataset observations changed during host install; before={before:?} after={after:?}"
+    )
+}
+
+fn verify_no_dataset_mutating_operations(
+    config: &HostConfig,
+    plan: &nas_csi_vm_manager::HostReconcilePlan,
+) -> Result<()> {
+    let dataset_roots = config
+        .exports
+        .values()
+        .map(|export| PathBuf::from(&export.source_path))
+        .collect::<Vec<_>>();
+
+    for step in &plan.steps {
+        let nas_csi_vm_manager::ReconcileStepKind::Apply(operation) = &step.kind else {
+            continue;
+        };
+        for target in reconcile_operation_target_paths(operation) {
+            let target_path = Path::new(&target);
+            for dataset_root in &dataset_roots {
+                if target_path.starts_with(dataset_root) {
+                    anyhow::bail!(
+                        "refusing host install plan that writes under exported dataset {} via step {}",
+                        dataset_root.display(),
+                        step.description
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn reconcile_operation_target_paths(
+    operation: &nas_csi_vm_manager::ReconcileOperation,
+) -> Vec<String> {
+    match operation {
+        nas_csi_vm_manager::ReconcileOperation::EnsureDirectory { path }
+        | nas_csi_vm_manager::ReconcileOperation::WriteRenderedArtifact { path, .. }
+        | nas_csi_vm_manager::ReconcileOperation::RewriteSeedImage { path, .. }
+        | nas_csi_vm_manager::ReconcileOperation::InstallOrUpdateSystemdUnit { path, .. }
+        | nas_csi_vm_manager::ReconcileOperation::CreateRootDisk { path, .. }
+        | nas_csi_vm_manager::ReconcileOperation::ResizeRootDisk { path, .. } => {
+            vec![path.clone()]
+        }
+        nas_csi_vm_manager::ReconcileOperation::RedefineDomain { xml_path, .. }
+        | nas_csi_vm_manager::ReconcileOperation::RedefineDomainRequiresShutdown {
+            xml_path, ..
+        } => vec![xml_path.clone()],
+        nas_csi_vm_manager::ReconcileOperation::RunCommand { creates, .. } => {
+            creates.iter().cloned().collect()
+        }
+        nas_csi_vm_manager::ReconcileOperation::ReloadSystemdUnits { .. }
+        | nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService { .. }
+        | nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService { .. }
+        | nas_csi_vm_manager::ReconcileOperation::DefineDomain { .. }
+        | nas_csi_vm_manager::ReconcileOperation::EnableDomainAutostart { .. }
+        | nas_csi_vm_manager::ReconcileOperation::StartDomain { .. } => Vec::new(),
+    }
+}
+
+fn wait_for_all_guest_agents(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+    timeout: Duration,
+) -> Result<()> {
+    for node in &config.nodes {
+        wait_for_guest_agent(config, options, runner, &node.domain, timeout)?;
+    }
+    Ok(())
+}
+
+fn wait_for_guest_agent(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+    domain: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let command = GuestCommandSpec::new(
+        "/bin/sh".to_string(),
+        ["-c".to_string(), "true".to_string()],
+    );
+    let deadline = Instant::now() + timeout;
+    loop {
+        match guest_command_success(runner, options, domain, &command) {
+            Ok(true) => {
+                println!("host-install: qemu guest agent ready for {domain}");
+                return Ok(());
+            }
+            Ok(false) | Err(_) => {}
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for VM {domain} qemu guest agent for cluster {}",
+                config.cluster.name
+            );
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn verify_host_install_state(
+    config: &HostConfig,
+    desired_apply: &nas_csi_vm_manager::HostApplyPlan,
+    _apply_options: &nas_csi_vm_manager::HostApplyPlanOptions,
+    render_options: &nas_csi_vm_manager::ArtifactRenderOptions,
+    actual: &nas_csi_vm_manager::HostActualState,
+    health: &HostHealthReport,
+    domains_started: bool,
+) -> Result<()> {
+    if health.status != "ok" {
+        anyhow::bail!("host health is degraded after install");
+    }
+
+    let expected_seed_hashes = expected_seed_hashes(desired_apply);
+    for node in &config.nodes {
+        let root_disk = actual
+            .paths
+            .get(&node.root_disk.image)
+            .ok_or_else(|| anyhow::anyhow!("missing root disk status for {}", node.name))?;
+        if !root_disk.exists() {
+            anyhow::bail!("root disk does not exist for {}", node.name);
+        }
+        if !actual.qemu_images.contains_key(&node.root_disk.image) {
+            anyhow::bail!("root disk qemu-img info is unavailable for {}", node.name);
+        }
+
+        let seed_path = nas_csi_vm_manager::seed_image_path(&node.root_disk.image, &node.domain);
+        let seed = actual
+            .paths
+            .get(&seed_path)
+            .ok_or_else(|| anyhow::anyhow!("missing seed image status for {}", node.name))?;
+        if !seed.exists() {
+            anyhow::bail!("cloud-init seed image does not exist for {}", node.name);
+        }
+        if let Some(expected_hash) = expected_seed_hashes.get(&seed_path)
+            && seed.content_hash.as_deref() != Some(expected_hash.as_str())
+        {
+            anyhow::bail!(
+                "cloud-init seed image hash does not match desired content for {}",
+                node.name
+            );
+        }
+
+        let domain = actual
+            .domains
+            .get(&node.domain)
+            .ok_or_else(|| anyhow::anyhow!("missing libvirt domain status for {}", node.name))?;
+        if !domain.exists || !domain.managed {
+            anyhow::bail!("libvirt domain {} is not present and managed", node.domain);
+        }
+        if node.autostart && domain.autostart != Some(true) {
+            anyhow::bail!("libvirt domain {} autostart is not enabled", node.domain);
+        }
+        if domains_started && !domain.active {
+            anyhow::bail!("libvirt domain {} is not running", node.domain);
+        }
+
+        for export_id in &node.exports {
+            let unit_name = format!(
+                "{}.service",
+                nas_csi_vm_manager::virtiofsd_service_name(&node.domain, export_id)
+            );
+            let unit = actual
+                .systemd_units
+                .get(&unit_name)
+                .ok_or_else(|| anyhow::anyhow!("missing systemd unit status for {unit_name}"))?;
+            if unit.installed_hash.is_none()
+                || unit.enabled != Some(true)
+                || unit.active != Some(true)
+            {
+                anyhow::bail!("virtiofsd unit {unit_name} is not installed, enabled, and active");
+            }
+
+            let socket_path =
+                nas_csi_vm_manager::virtiofs_socket_path(render_options, &node.domain, export_id);
+            let (_, socket) = inspect_socket_path(&socket_path);
+            if !socket {
+                anyhow::bail!("virtiofs socket is not ready: {socket_path}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn expected_seed_hashes(
+    desired_apply: &nas_csi_vm_manager::HostApplyPlan,
+) -> BTreeMap<String, String> {
+    desired_apply
+        .steps
+        .iter()
+        .filter_map(|step| match &step.kind {
+            nas_csi_vm_manager::ApplyStepKind::WriteBinaryFile { path, contents } => {
+                Some((path.clone(), nas_csi_vm_manager::content_hash(contents)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn verify_post_install_idempotence(plan: &nas_csi_vm_manager::HostReconcilePlan) -> Result<()> {
+    let summary = summarize_reconcile_plan(plan);
+    if summary.apply == 0 && summary.refuse == 0 {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "host install was not idempotent after execute: apply={} refuse={}",
+        summary.apply,
+        summary.refuse
+    )
+}
+
+#[derive(Debug)]
+struct ClusterInstallOptions {
+    artifact_dir: PathBuf,
+    manifest_root: PathBuf,
+    kubectl: String,
+    reboot_node: Option<String>,
+    post_reboot_check: bool,
+    wait_timeout: Duration,
+    execute: bool,
+}
+
+fn run_cluster_install(
+    config: &HostConfig,
+    install_options: ClusterInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    if install_options.post_reboot_check && install_options.reboot_node.is_some() {
+        anyhow::bail!("--post-reboot-check cannot be combined with --reboot-node");
+    }
+
+    let options = cluster_options_from_config(
+        config,
+        &install_options.artifact_dir,
+        &install_options.kubectl,
+    );
+    let manifests = load_cluster_manifests(config, &install_options.manifest_root)?;
+    verify_substrate_manifest_scope(&manifests)?;
+    let actual = inspect_cluster_actual_state(config, &options, &manifests, runner)?;
+    let plan =
+        nas_csi_cluster_manager::plan_cluster_reconcile(config, &options, &actual, &manifests);
+    verify_cluster_plan_order(config, &plan)?;
+    log_cluster_reconcile_decisions(&plan);
+    print_cluster_reconcile_plan(&plan);
+
+    if install_options.post_reboot_check {
+        print_cluster_status(config, &actual, &manifests);
+        verify_cluster_install_state(config, &actual, &manifests, &options)?;
+        verify_cluster_install_idempotence(&plan)?;
+        println!("cluster install: post-reboot verification passed");
+        return Ok(());
+    }
+
+    if !install_options.execute {
+        println!("cluster install: dry run only; pass --execute to apply changes");
+        return Ok(());
+    }
+
+    execute_cluster_reconcile_plan(&plan, &options, runner)?;
+    let actual = inspect_cluster_actual_state(config, &options, &manifests, runner)?;
+    print_cluster_status(config, &actual, &manifests);
+    verify_cluster_install_state(config, &actual, &manifests, &options)?;
+    let post_plan =
+        nas_csi_cluster_manager::plan_cluster_reconcile(config, &options, &actual, &manifests);
+    verify_cluster_install_idempotence(&post_plan)?;
+
+    if let Some(node_name) = install_options.reboot_node.as_deref() {
+        reboot_cluster_node(
+            config,
+            &options,
+            runner,
+            node_name,
+            install_options.wait_timeout,
+        )?;
+        let actual = inspect_cluster_actual_state(config, &options, &manifests, runner)?;
+        print_cluster_status(config, &actual, &manifests);
+        verify_cluster_install_state(config, &actual, &manifests, &options)?;
+    }
+
+    println!("cluster install: completed cluster substrate verification");
+    Ok(())
+}
+
+const LAB_CONTROLLER_IMAGE: &str = "ghcr.io/chris-arsenault/nas-csi-controller:0.1.0-lab1";
+const LAB_NODE_IMAGE: &str = "ghcr.io/chris-arsenault/nas-csi-node:0.1.0-lab1";
+const CSI_DRIVER_NAME: &str = "nas-csi.dev";
+const EXISTING_DATASET_STORAGE_CLASS: &str = "nas-csi-existing";
+const NODE_RUNTIME_CONFIG_PATH: &str = "/etc/nas-csi/node.yaml";
+const MISSING_EXPORT_ID: &str = "nas-csi-missing-export";
+
+#[derive(Debug)]
+struct CsiInstallOptions {
+    artifact_dir: PathBuf,
+    manifest_root: PathBuf,
+    kubectl: String,
+    namespace: String,
+    smoke_image: String,
+    wait_timeout: Duration,
+    execute: bool,
+}
+
+#[derive(Debug)]
+struct WorkloadValidationOptions {
+    artifact_dir: PathBuf,
+    kubectl: String,
+    namespace: String,
+    repo_export: Option<String>,
+    content_export: Option<String>,
+    repo_image: String,
+    content_image: String,
+    content_command: String,
+    wait_timeout: Duration,
+    small_file_count: u32,
+    keep_pods: bool,
+    execute: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WorkloadValidationSelection {
+    repo_export: String,
+    content_export: String,
+}
+
+fn run_csi_install(
+    config: &HostConfig,
+    install_options: CsiInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    verify_csi_install_inputs(config, &install_options)?;
+
+    let cluster_options = cluster_options_from_config(
+        config,
+        &install_options.artifact_dir,
+        &install_options.kubectl,
+    );
+    let node_configs = render_node_runtime_configs(config)?;
+    let nas_csi_manifest_path = install_options
+        .manifest_root
+        .join("kubernetes")
+        .join("nas-csi")
+        .join("nas-csi.yaml");
+    let nas_csi_manifest = fs::read_to_string(&nas_csi_manifest_path).with_context(|| {
+        format!(
+            "failed to read nas-csi manifest {}",
+            nas_csi_manifest_path.display()
+        )
+    })?;
+    verify_nas_csi_manifest_uses_lab_images(&nas_csi_manifest)?;
+
+    let csi_artifact_dir = install_options.artifact_dir.join("csi");
+    let static_manifest =
+        render_static_existing_dataset_manifest(config, &install_options.namespace);
+    let static_manifest_path = csi_artifact_dir.join("static-existing-datasets.yaml");
+    let smoke_manifest = render_csi_smoke_pod_manifest(config, &install_options);
+    let smoke_manifest_path = csi_artifact_dir.join("smoke-pods.yaml");
+    let missing_manifest = render_missing_export_manifest(config, &install_options);
+    let missing_manifest_path = csi_artifact_dir.join("missing-export-probe.yaml");
+
+    print_csi_install_plan(
+        config,
+        &install_options,
+        &nas_csi_manifest_path,
+        &static_manifest_path,
+        &smoke_manifest_path,
+    );
+
+    if !install_options.execute {
+        println!("csi install: dry run only; pass --execute to apply changes");
+        return Ok(());
+    }
+
+    let before_datasets = observe_datasets(config)?;
+
+    install_node_runtime_configs(config, &cluster_options, runner, &node_configs)?;
+    verify_node_runtime_configs(config, &cluster_options, runner, &node_configs)?;
+
+    apply_nas_csi_manifest(config, &install_options, runner, &nas_csi_manifest_path)?;
+    wait_for_nas_csi_rollout(config, &install_options, runner)?;
+
+    apply_generated_manifest(
+        config,
+        &install_options,
+        runner,
+        &static_manifest_path,
+        &static_manifest,
+        "static existing-dataset PV/PVC manifest",
+    )?;
+    verify_guest_virtiofs_mounts(config, &cluster_options, runner)?;
+
+    apply_generated_manifest(
+        config,
+        &install_options,
+        runner,
+        &smoke_manifest_path,
+        &smoke_manifest,
+        "CSI smoke pod manifest",
+    )?;
+    wait_for_smoke_pods(config, &install_options, runner)?;
+    verify_pod_mounts(config, &install_options, runner)?;
+    verify_smoke_pod_restart(
+        config,
+        &install_options,
+        runner,
+        &smoke_manifest_path,
+        &smoke_manifest,
+    )?;
+    verify_node_plugin_restart(config, &install_options, runner)?;
+    verify_missing_export_fails_closed(
+        config,
+        &install_options,
+        runner,
+        &missing_manifest_path,
+        &missing_manifest,
+    )?;
+    verify_read_only_exports_are_mounted_read_only(config, &install_options, runner)?;
+    verify_pods_match_host_dataset_entries(config, &install_options, runner)?;
+
+    let after_datasets = observe_datasets(config)?;
+    verify_dataset_observations_stable(&before_datasets, &after_datasets)?;
+
+    println!("csi install: completed static existing-dataset CSI verification");
+    Ok(())
+}
+
+fn run_workload_validation(
+    config: &HostConfig,
+    options: WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    verify_workload_validation_inputs(config, &options)?;
+    let selection = select_workload_validation_exports(config, &options)?;
+    let cluster_options =
+        cluster_options_from_config(config, &options.artifact_dir, &options.kubectl);
+    let validation_dir = options.artifact_dir.join("workload-validation");
+    let manifest_path = validation_dir.join("workload-pods.yaml");
+    let report_path = validation_dir.join("report.txt");
+    let manifest = render_workload_validation_manifest(config, &options, &selection)?;
+
+    print_workload_validation_plan(config, &options, &selection, &manifest_path, &report_path);
+    write_text_atomic_if_changed(&manifest_path.display().to_string(), &manifest)?;
+
+    if !options.execute {
+        write_text_atomic_if_changed(
+            &report_path.display().to_string(),
+            &render_workload_validation_dry_run_report(config, &options, &selection),
+        )?;
+        println!("workload validate: dry run only; pass --execute to run target-host validation");
+        return Ok(());
+    }
+
+    let before_datasets = observe_datasets(config)?;
+    let mut report = render_workload_validation_report_header(config, &options, &selection);
+    let run_result = (|| -> Result<()> {
+        apply_workload_validation_manifest(config, &options, runner, &manifest_path)?;
+        wait_for_workload_pods(config, &options, runner, &selection)?;
+
+        report.push_str("\n## virtiofsd before workloads\n");
+        report.push_str(&capture_virtiofsd_observations(
+            config,
+            &options,
+            &cluster_options,
+            runner,
+            &selection,
+            "before",
+        )?);
+
+        report.push_str("\n## repository workload\n");
+        report.push_str(&run_repository_workload(
+            config, &options, runner, &selection,
+        )?);
+        report.push_str(&verify_export_visibility_from_host_write(
+            config,
+            &options,
+            &cluster_options,
+            runner,
+            &selection.repo_export,
+            &workload_repo_pod_name(&selection.repo_export),
+            REPO_WORKLOAD_MOUNT_PATH,
+            "repo-smb-visible",
+        )?);
+
+        report.push_str("\n## read-only content workload\n");
+        report.push_str(&run_content_streaming_workload(
+            config, &options, runner, &selection,
+        )?);
+        report.push_str(&verify_export_visibility_from_host_write(
+            config,
+            &options,
+            &cluster_options,
+            runner,
+            &selection.content_export,
+            &workload_content_pod_name(&selection.content_export),
+            CONTENT_WORKLOAD_MOUNT_PATH,
+            "content-smb-visible",
+        )?);
+
+        report.push_str("\n## virtiofsd restart behavior\n");
+        report.push_str(&restart_workload_virtiofsd_service(
+            config, &options, runner, &selection,
+        )?);
+
+        report.push_str("\n## virtiofsd after workloads\n");
+        report.push_str(&capture_virtiofsd_observations(
+            config,
+            &options,
+            &cluster_options,
+            runner,
+            &selection,
+            "after",
+        )?);
+
+        verify_dataset_observations_stable(&before_datasets, &observe_datasets(config)?)?;
+        Ok(())
+    })();
+
+    match run_result {
+        Ok(()) => {
+            report.push_str("\n## virtiofsd fork decision\n");
+            report.push_str("decision: no fork is justified by this validation run\n");
+            report.push_str(
+                "reason: repo, SMB-visible dataset coherency, read-only streaming, and virtiofsd restart checks completed without a specific failing case\n",
+            );
+            write_text_atomic_if_changed(&report_path.display().to_string(), &report)?;
+            if !options.keep_pods {
+                delete_workload_validation_pods(config, &options, runner, &manifest_path)?;
+            }
+            println!(
+                "workload validate: completed real workload validation; report={}",
+                report_path.display()
+            );
+            Ok(())
+        }
+        Err(error) => {
+            report.push_str("\n## virtiofsd fork decision\n");
+            report.push_str("decision: do not fork from guesswork\n");
+            report.push_str(&format!(
+                "failingCase: {}\n",
+                error.to_string().replace('\n', " ")
+            ));
+            report.push_str(
+                "reason: a fork decision must be tied to the captured failing validation step above\n",
+            );
+            let _ = write_text_atomic_if_changed(&report_path.display().to_string(), &report);
+            Err(error)
+        }
+    }
+}
+
+fn verify_workload_validation_inputs(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+) -> Result<()> {
+    if config.nodes.is_empty() {
+        anyhow::bail!("workload validation requires at least one configured VM node");
+    }
+    if config.exports.is_empty() {
+        anyhow::bail!("workload validation requires at least one configured export");
+    }
+    if options.namespace.trim().is_empty() {
+        anyhow::bail!("workload validation namespace must not be empty");
+    }
+    if options.repo_image.trim().is_empty() {
+        anyhow::bail!("workload validation repo image must not be empty");
+    }
+    if options.content_image.trim().is_empty() {
+        anyhow::bail!("workload validation content image must not be empty");
+    }
+    if options.content_command.trim().is_empty() {
+        anyhow::bail!("workload validation content command must not be empty");
+    }
+    if options.small_file_count == 0 {
+        anyhow::bail!("workload validation small-file count must be greater than zero");
+    }
+    for export_id in config.exports.keys() {
+        if node_for_export(config, export_id).is_none() {
+            anyhow::bail!("export {export_id} is not assigned to any node");
+        }
+    }
+    Ok(())
+}
+
+fn select_workload_validation_exports(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+) -> Result<WorkloadValidationSelection> {
+    let repo_export = select_workload_export(
+        config,
+        options.repo_export.as_deref(),
+        AccessMode::ReadWrite,
+    )
+    .context("failed to select repository workload export")?;
+    let content_export = select_workload_export(
+        config,
+        options.content_export.as_deref(),
+        AccessMode::ReadOnly,
+    )
+    .context("failed to select read-only content workload export")?;
+    Ok(WorkloadValidationSelection {
+        repo_export,
+        content_export,
+    })
+}
+
+fn select_workload_export(
+    config: &HostConfig,
+    requested: Option<&str>,
+    required_access: AccessMode,
+) -> Result<String> {
+    if let Some(export_id) = requested {
+        let export = config
+            .exports
+            .get(export_id)
+            .ok_or_else(|| anyhow::anyhow!("export {export_id} is not configured"))?;
+        if export.access != required_access {
+            anyhow::bail!(
+                "export {export_id} has access {}, expected {}",
+                export.access,
+                required_access
+            );
+        }
+        return Ok(export_id.to_string());
+    }
+
+    config
+        .exports
+        .iter()
+        .find_map(|(export_id, export)| {
+            (export.access == required_access).then(|| export_id.clone())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no {required_access} export is configured"))
+}
+
+const REPO_WORKLOAD_MOUNT_PATH: &str = "/work/repo";
+const CONTENT_WORKLOAD_MOUNT_PATH: &str = "/content";
+
+fn render_workload_validation_manifest(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    selection: &WorkloadValidationSelection,
+) -> Result<String> {
+    let _repo_export = config
+        .exports
+        .get(&selection.repo_export)
+        .ok_or_else(|| anyhow::anyhow!("missing export {}", selection.repo_export))?;
+    let _content_export = config
+        .exports
+        .get(&selection.content_export)
+        .ok_or_else(|| anyhow::anyhow!("missing export {}", selection.content_export))?;
+    let repo_node = node_for_export(config, &selection.repo_export).ok_or_else(|| {
+        anyhow::anyhow!("export {} is not assigned to a node", selection.repo_export)
+    })?;
+    let content_node = node_for_export(config, &selection.content_export).ok_or_else(|| {
+        anyhow::anyhow!(
+            "export {} is not assigned to a node",
+            selection.content_export
+        )
+    })?;
+    Ok(format!(
+        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: {}\n  namespace: {}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    app.kubernetes.io/component: workload-validation\n    nas-csi.dev/workload: repo\n    nas-csi.dev/export-id: {}\nspec:\n  restartPolicy: Always\n  nodeName: {}\n  containers:\n    - name: repo\n      image: {}\n      command:\n        - /bin/sh\n        - -c\n        - {}\n      volumeMounts:\n        - name: dataset\n          mountPath: {REPO_WORKLOAD_MOUNT_PATH}\n          readOnly: false\n  volumes:\n    - name: dataset\n      persistentVolumeClaim:\n        claimName: {}\n        readOnly: false\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: {}\n  namespace: {}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    app.kubernetes.io/component: workload-validation\n    nas-csi.dev/workload: content\n    nas-csi.dev/export-id: {}\nspec:\n  restartPolicy: Always\n  nodeName: {}\n  containers:\n    - name: content\n      image: {}\n      command:\n        - /bin/sh\n        - -c\n        - {}\n      volumeMounts:\n        - name: dataset\n          mountPath: {CONTENT_WORKLOAD_MOUNT_PATH}\n          readOnly: true\n  volumes:\n    - name: dataset\n      persistentVolumeClaim:\n        claimName: {}\n        readOnly: true\n",
+        workload_repo_pod_name(&selection.repo_export),
+        yaml_quote(&options.namespace),
+        yaml_quote(&selection.repo_export),
+        yaml_quote(&repo_node.name),
+        yaml_quote(&options.repo_image),
+        yaml_quote("trap : TERM INT; sleep 2147483647 & wait"),
+        existing_dataset_resource_name(&selection.repo_export),
+        workload_content_pod_name(&selection.content_export),
+        yaml_quote(&options.namespace),
+        yaml_quote(&selection.content_export),
+        yaml_quote(&content_node.name),
+        yaml_quote(&options.content_image),
+        yaml_quote(&options.content_command),
+        existing_dataset_resource_name(&selection.content_export),
+    ))
+}
+
+fn print_workload_validation_plan(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    selection: &WorkloadValidationSelection,
+    manifest_path: &Path,
+    report_path: &Path,
+) {
+    let repo = &config.exports[&selection.repo_export];
+    let content = &config.exports[&selection.content_export];
+    println!("workload validation plan");
+    println!();
+    println!("namespace: {}", options.namespace);
+    println!("manifest: {}", manifest_path.display());
+    println!("report: {}", report_path.display());
+    println!(
+        "repo export: {} dataset={} source={} image={} smallFiles={}",
+        selection.repo_export,
+        repo.dataset,
+        repo.source_path,
+        options.repo_image,
+        options.small_file_count
+    );
+    println!(
+        "content export: {} dataset={} source={} image={}",
+        selection.content_export, content.dataset, content.source_path, options.content_image
+    );
+    println!("content command: {}", options.content_command);
+}
+
+fn render_workload_validation_dry_run_report(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    selection: &WorkloadValidationSelection,
+) -> String {
+    let mut report = render_workload_validation_report_header(config, options, selection);
+    report.push_str("\n## dry run\n");
+    report.push_str("execute: false\n");
+    report.push_str("status: artifacts rendered; no target-host workload validation was run\n");
+    report
+}
+
+fn render_workload_validation_report_header(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    selection: &WorkloadValidationSelection,
+) -> String {
+    let repo = &config.exports[&selection.repo_export];
+    let content = &config.exports[&selection.content_export];
+    format!(
+        "# nas-csi workload validation report\n\ncluster: {}\nnamespace: {}\nrepoExport: {}\nrepoDataset: {}\nrepoSource: {}\ncontentExport: {}\ncontentDataset: {}\ncontentSource: {}\nsmallFileCount: {}\n",
+        config.cluster.name,
+        options.namespace,
+        selection.repo_export,
+        repo.dataset,
+        repo.source_path,
+        selection.content_export,
+        content.dataset,
+        content.source_path,
+        options.small_file_count
+    )
+}
+
+fn apply_workload_validation_manifest(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    manifest_path: &Path,
+) -> Result<()> {
+    let command = kubectl_command(
+        config,
+        &options.kubectl,
+        [
+            "apply".to_string(),
+            "-f".to_string(),
+            manifest_path.display().to_string(),
+        ],
+    );
+    run_cluster_command(runner, &command).context("failed to apply workload validation pods")?;
+    println!(
+        "workload validate: applied validation pods {}",
+        manifest_path.display()
+    );
+    Ok(())
+}
+
+fn wait_for_workload_pods(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    selection: &WorkloadValidationSelection,
+) -> Result<()> {
+    for pod in [
+        workload_repo_pod_name(&selection.repo_export),
+        workload_content_pod_name(&selection.content_export),
+    ] {
+        let command = kubectl_command(
+            config,
+            &options.kubectl,
+            [
+                "-n".to_string(),
+                options.namespace.clone(),
+                "wait".to_string(),
+                format!("pod/{pod}"),
+                "--for=condition=Ready".to_string(),
+                format!("--timeout={}s", options.wait_timeout.as_secs()),
+            ],
+        );
+        wait_for_cluster_command_with_timeout(runner, &command, options.wait_timeout)
+            .with_context(|| format!("timed out waiting for workload pod {pod}"))?;
+        println!("workload validate: pod {pod} is Ready");
+    }
+    Ok(())
+}
+
+fn run_repository_workload(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    selection: &WorkloadValidationSelection,
+) -> Result<String> {
+    let pod = workload_repo_pod_name(&selection.repo_export);
+    let output = run_workload_pod_script(
+        config,
+        options,
+        runner,
+        &pod,
+        repository_workload_script(),
+        [
+            REPO_WORKLOAD_MOUNT_PATH.to_string(),
+            options.small_file_count.to_string(),
+        ],
+    )
+    .context("repository workload validation failed")?;
+    println!("workload validate: repository workload completed in pod {pod}");
+    Ok(format!("{output}\n"))
+}
+
+fn run_content_streaming_workload(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    selection: &WorkloadValidationSelection,
+) -> Result<String> {
+    let pod = workload_content_pod_name(&selection.content_export);
+    let output = run_workload_pod_script(
+        config,
+        options,
+        runner,
+        &pod,
+        content_streaming_workload_script(),
+        [CONTENT_WORKLOAD_MOUNT_PATH.to_string()],
+    )
+    .context("read-only content streaming workload validation failed")?;
+    println!("workload validate: content streaming workload completed in pod {pod}");
+    Ok(format!("{output}\n"))
+}
+
+fn run_workload_pod_script<I>(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    pod: &str,
+    script: &str,
+    args: I,
+) -> Result<String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut command_args = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+        "nas-csi-workload".to_string(),
+    ];
+    command_args.extend(args);
+    let command = kubectl_exec_command_in_namespace(
+        config,
+        &options.kubectl,
+        &options.namespace,
+        pod,
+        command_args,
+    );
+    let vm_command = cluster_command_to_vm_command(&command);
+    let output = runner.output(&vm_command)?.ok_or_else(|| {
+        anyhow::anyhow!("workload command failed or returned no output: {command}")
+    })?;
+    Ok(output)
+}
+
+fn verify_export_visibility_from_host_write(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    cluster_options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+    export_id: &str,
+    pod: &str,
+    pod_mount_path: &str,
+    label: &str,
+) -> Result<String> {
+    let export = config
+        .exports
+        .get(export_id)
+        .ok_or_else(|| anyhow::anyhow!("missing export {export_id}"))?;
+    let relative_path = format!(
+        ".nas-csi-validation/{}-{}.txt",
+        safe_mount_segment(label),
+        validation_run_id()
+    );
+    let host_path = Path::new(&export.source_path).join(&relative_path);
+    let contents = format!(
+        "nas-csi workload validation\nexport={export_id}\nlabel={label}\nrun={}\n",
+        validation_run_id()
+    );
+    write_text_atomic_if_changed(&host_path.display().to_string(), &contents).with_context(
+        || {
+            format!(
+                "failed to write validation sentinel {}",
+                host_path.display()
+            )
+        },
+    )?;
+
+    let result = (|| -> Result<String> {
+        let mut verified_nodes = 0_usize;
+        for node in config.nodes.iter().filter(|node| {
+            node.exports
+                .iter()
+                .any(|node_export| node_export == export_id)
+        }) {
+            let guest_path = format!(
+                "{}/{}",
+                nas_csi_vm_manager::guest_virtiofs_mount_path(export_id),
+                relative_path
+            );
+            let actual = guest_exec_output(
+                runner,
+                cluster_options,
+                &node.domain,
+                &GuestCommandSpec::new("/bin/cat".to_string(), [guest_path.clone()]),
+            )
+            .with_context(|| {
+                format!(
+                    "guest {} did not observe validation sentinel {}",
+                    node.name, guest_path
+                )
+            })?;
+            if actual != contents {
+                anyhow::bail!(
+                    "guest {} saw different sentinel contents for export {export_id}",
+                    node.name
+                );
+            }
+            verified_nodes += 1;
+        }
+
+        let pod_path = format!("{pod_mount_path}/{relative_path}");
+        let command = kubectl_exec_command_in_namespace(
+            config,
+            &options.kubectl,
+            &options.namespace,
+            pod,
+            ["/bin/cat".to_string(), pod_path.clone()],
+        );
+        let pod_contents = runner
+            .output(&cluster_command_to_vm_command(&command))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("pod {pod} did not observe validation sentinel {pod_path}")
+            })?;
+        if pod_contents != contents {
+            anyhow::bail!("pod {pod} saw different sentinel contents for export {export_id}");
+        }
+
+        println!(
+            "workload validate: verified {label} host/guest/pod visibility for export {export_id}"
+        );
+        Ok(format!(
+            "{label}: relativePath={relative_path} verifiedGuestNodes={verified_nodes} verifiedPod={pod}\n"
+        ))
+    })();
+
+    let _ = fs::remove_file(&host_path);
+    if let Some(parent) = host_path.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+
+    result
+}
+
+fn capture_virtiofsd_observations(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    cluster_options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+    selection: &WorkloadValidationSelection,
+    phase: &str,
+) -> Result<String> {
+    let render_options = render_options_from_config(config);
+    let mut export_ids = BTreeSet::new();
+    export_ids.insert(selection.repo_export.clone());
+    export_ids.insert(selection.content_export.clone());
+    let mut report = String::new();
+    for export_id in export_ids {
+        let export = config
+            .exports
+            .get(&export_id)
+            .ok_or_else(|| anyhow::anyhow!("missing export {export_id}"))?;
+        for node in config.nodes.iter().filter(|node| {
+            node.exports
+                .iter()
+                .any(|node_export| node_export == &export_id)
+        }) {
+            let unit = format!(
+                "{}.service",
+                nas_csi_vm_manager::virtiofsd_service_name(&node.domain, &export_id)
+            );
+            let socket_path =
+                nas_csi_vm_manager::virtiofs_socket_path(&render_options, &node.domain, &export_id);
+            let systemd = command_output(
+                runner,
+                &config.host_tools.systemctl,
+                [
+                    "show",
+                    &unit,
+                    "-p",
+                    "ActiveState",
+                    "-p",
+                    "SubState",
+                    "-p",
+                    "Result",
+                    "-p",
+                    "MainPID",
+                    "-p",
+                    "NRestarts",
+                    "-p",
+                    "MemoryCurrent",
+                    "-p",
+                    "CPUUsageNSec",
+                    "-p",
+                    "ExecMainStatus",
+                    "--no-pager",
+                ],
+            )?
+            .unwrap_or_else(|| "systemctl show unavailable".to_string());
+            let socket_status = match fs::metadata(&socket_path) {
+                Ok(metadata) if metadata.file_type().is_socket() => "socket",
+                Ok(_) => "non-socket",
+                Err(error) if error.kind() == ErrorKind::NotFound => "missing",
+                Err(_) => "error",
+            };
+            let domain = inspect_domain(
+                runner,
+                &cluster_options.virsh_path,
+                &cluster_options.libvirt_uri,
+                &node.domain,
+            )?;
+            let cache_policy = domain
+                .xml
+                .as_deref()
+                .map(|xml| extract_virtiofs_cache_policy(xml, &export.tag))
+                .unwrap_or_else(|| "domain-xml-unavailable".to_string());
+            let mount_path = nas_csi_vm_manager::guest_virtiofs_mount_path(&export_id);
+            let mountinfo = guest_exec_output(
+                runner,
+                cluster_options,
+                &node.domain,
+                &GuestCommandSpec::new(
+                    "/bin/sh".to_string(),
+                    [
+                        "-c".to_string(),
+                        "awk -v mp=\"$1\" '$5 == mp { print }' /proc/self/mountinfo".to_string(),
+                        "nas-csi-mountinfo".to_string(),
+                        mount_path.clone(),
+                    ],
+                ),
+            )
+            .unwrap_or_else(|error| format!("mountinfo unavailable: {error}"));
+            report.push_str(&format!(
+                "phase={phase} export={export_id} node={} unit={unit} socket={} socketStatus={socket_status} cachePolicy={cache_policy}\n",
+                node.name, socket_path
+            ));
+            for line in systemd.lines() {
+                report.push_str(&format!("systemd.{unit}.{line}\n"));
+            }
+            let mountinfo = mountinfo.replace('\n', " | ");
+            report.push_str(&format!(
+                "guestMount export={export_id} node={} mountPath={mount_path} mountinfo={mountinfo}\n",
+                node.name
+            ));
+        }
+    }
+    let _ = options;
+    Ok(report)
+}
+
+fn restart_workload_virtiofsd_service(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    selection: &WorkloadValidationSelection,
+) -> Result<String> {
+    let node = node_for_export(config, &selection.repo_export)
+        .ok_or_else(|| anyhow::anyhow!("repo export is not assigned to a node"))?;
+    let unit = format!(
+        "{}.service",
+        nas_csi_vm_manager::virtiofsd_service_name(&node.domain, &selection.repo_export)
+    );
+    let command = nas_csi_vm_manager::CommandSpec::new(
+        config.host_tools.systemctl.clone(),
+        ["restart".to_string(), unit.clone()],
+    );
+    runner
+        .run(&command)
+        .with_context(|| format!("failed to restart virtiofsd unit {unit}"))?;
+
+    let socket_path = nas_csi_vm_manager::virtiofs_socket_path(
+        &render_options_from_config(config),
+        &node.domain,
+        &selection.repo_export,
+    );
+    wait_for_virtiofs_socket_with_timeout(&socket_path, options.wait_timeout)
+        .with_context(|| format!("virtiofsd socket did not recover for {unit}"))?;
+    verify_workload_mount_ready(
+        config,
+        options,
+        runner,
+        &workload_repo_pod_name(&selection.repo_export),
+        REPO_WORKLOAD_MOUNT_PATH,
+    )?;
+    verify_workload_mount_ready(
+        config,
+        options,
+        runner,
+        &workload_content_pod_name(&selection.content_export),
+        CONTENT_WORKLOAD_MOUNT_PATH,
+    )?;
+    println!("workload validate: restarted {unit} and verified workload pods still read mounts");
+    Ok(format!(
+        "restartedUnit={unit} socket={socket_path} result=workload-mounts-readable\n"
+    ))
+}
+
+fn verify_workload_mount_ready(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    pod: &str,
+    mount_path: &str,
+) -> Result<()> {
+    let command = kubectl_exec_command_in_namespace(
+        config,
+        &options.kubectl,
+        &options.namespace,
+        pod,
+        [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "test -d \"$1\" && ls -A \"$1\" >/dev/null 2>&1".to_string(),
+            "nas-csi-mount-ready".to_string(),
+            mount_path.to_string(),
+        ],
+    );
+    if !runner.status(&cluster_command_to_vm_command(&command))? {
+        anyhow::bail!("workload pod {pod} cannot read mount {mount_path}");
+    }
+    Ok(())
+}
+
+fn delete_workload_validation_pods(
+    config: &HostConfig,
+    options: &WorkloadValidationOptions,
+    runner: &impl CommandRunner,
+    manifest_path: &Path,
+) -> Result<()> {
+    let command = kubectl_command(
+        config,
+        &options.kubectl,
+        [
+            "delete".to_string(),
+            "-f".to_string(),
+            manifest_path.display().to_string(),
+            "--ignore-not-found=true".to_string(),
+            "--wait=true".to_string(),
+        ],
+    );
+    run_cluster_command(runner, &command).context("failed to delete workload validation pods")?;
+    println!("workload validate: deleted validation pods");
+    Ok(())
+}
+
+fn repository_workload_script() -> &'static str {
+    r#"set -eu
+mount_path="$1"
+small_file_count="$2"
+test -d "$mount_path"
+echo "repoMount=$mount_path"
+if command -v git >/dev/null 2>&1; then
+    git_dir=""
+    if [ -d "$mount_path/.git" ]; then
+        git_dir="$mount_path/.git"
+    else
+        git_dir="$(find "$mount_path" -mindepth 2 -maxdepth 4 -type d -name .git -print -quit 2>/dev/null || true)"
+    fi
+    if [ -n "$git_dir" ]; then
+        repo="${git_dir%/.git}"
+        git -C "$repo" status --short >/tmp/nas-csi-git-status.txt
+        echo "gitStatusRepo=$repo"
+    else
+        echo "gitStatusRepo=none-found"
+    fi
+else
+    echo "gitStatusRepo=git-missing"
+fi
+if command -v npm >/dev/null 2>&1; then
+    package_file="$(find "$mount_path" -maxdepth 4 -type f -name package.json -print -quit 2>/dev/null || true)"
+    if [ -n "$package_file" ]; then
+        project="$(dirname "$package_file")"
+        rm -rf /tmp/nas-csi-npm
+        mkdir -p /tmp/nas-csi-npm
+        cp -a "$project"/. /tmp/nas-csi-npm/
+        cd /tmp/nas-csi-npm
+        npm install --ignore-scripts --no-audit --no-fund
+        npm run build --if-present
+        echo "npmProject=$project"
+    else
+        echo "npmProject=none-found"
+    fi
+else
+    echo "npmProject=npm-missing"
+fi
+scratch="$mount_path/.nas-csi-validation/repo-small-files-$$"
+rm -rf "$scratch"
+mkdir -p "$scratch"
+i=0
+while [ "$i" -lt "$small_file_count" ]; do
+    printf 'nas-csi small-file validation %s\n' "$i" > "$scratch/file-$i.txt"
+    i=$((i + 1))
+done
+count="$(find "$scratch" -type f | wc -l | tr -d ' ')"
+test "$count" = "$small_file_count"
+rm -rf "$scratch"
+test ! -e "$scratch"
+echo "smallFilesWritten=$count"
+"#
+}
+
+fn content_streaming_workload_script() -> &'static str {
+    r#"set -eu
+mount_path="$1"
+test -d "$mount_path"
+echo "contentMount=$mount_path"
+first_file="$(find "$mount_path" -type f -print -quit 2>/dev/null || true)"
+if [ -n "$first_file" ]; then
+    bytes="$(wc -c < "$first_file" | tr -d ' ')"
+    dd if="$first_file" of=/dev/null bs=1048576 count=16 2>/tmp/nas-csi-dd.log || true
+    echo "sampleFile=$first_file"
+    echo "sampleBytes=$bytes"
+else
+    echo "sampleFile=none-found"
+fi
+if command -v wget >/dev/null 2>&1; then
+    wget -qO- http://127.0.0.1:8080/ >/tmp/nas-csi-content-index
+    echo "httpProbe=ok"
+else
+    echo "httpProbe=wget-missing"
+fi
+find "$mount_path" -maxdepth 1 -print >/tmp/nas-csi-content-list
+echo "contentStreaming=ok"
+"#
+}
+
+fn workload_repo_pod_name(export_id: &str) -> String {
+    safe_k8s_name("nas-csi-workload-repo", export_id)
+}
+
+fn workload_content_pod_name(export_id: &str) -> String {
+    safe_k8s_name("nas-csi-workload-content", export_id)
+}
+
+fn validation_run_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    format!("{}-{now}", process::id())
+}
+
+fn extract_virtiofs_cache_policy(xml: &str, tag: &str) -> String {
+    let single_quoted_target = format!("dir='{tag}'");
+    let double_quoted_target = format!("dir=\"{tag}\"");
+    for block in xml.split("<filesystem").skip(1) {
+        let filesystem = block.split("</filesystem>").next().unwrap_or(block);
+        if !filesystem.contains(&single_quoted_target)
+            && !filesystem.contains(&double_quoted_target)
+        {
+            continue;
+        }
+        return xml_attr_value(filesystem, "cache").unwrap_or_else(|| "not-set".to_string());
+    }
+    "not-found".to_string()
+}
+
+fn xml_attr_value(xml: &str, name: &str) -> Option<String> {
+    let single = format!("{name}='");
+    if let Some(start) = xml.find(&single) {
+        let value_start = start + single.len();
+        return xml[value_start..]
+            .find('\'')
+            .map(|end| xml[value_start..value_start + end].to_string());
+    }
+    let double = format!("{name}=\"");
+    if let Some(start) = xml.find(&double) {
+        let value_start = start + double.len();
+        return xml[value_start..]
+            .find('"')
+            .map(|end| xml[value_start..value_start + end].to_string());
+    }
+    None
+}
+
+fn verify_csi_install_inputs(config: &HostConfig, options: &CsiInstallOptions) -> Result<()> {
+    if config.nodes.is_empty() {
+        anyhow::bail!("csi install requires at least one configured VM node");
+    }
+    if config.exports.is_empty() {
+        anyhow::bail!("csi install requires at least one configured export");
+    }
+    if options.namespace.trim().is_empty() {
+        anyhow::bail!("csi install namespace must not be empty");
+    }
+    if options.smoke_image.trim().is_empty() {
+        anyhow::bail!("csi install smoke image must not be empty");
+    }
+
+    for export_id in config.exports.keys() {
+        if node_for_export(config, export_id).is_none() {
+            anyhow::bail!("export {export_id} is not assigned to any node");
+        }
+    }
+
+    Ok(())
+}
+
+fn render_node_runtime_configs(config: &HostConfig) -> Result<BTreeMap<String, String>> {
+    let mut configs = BTreeMap::new();
+    for node in &config.nodes {
+        configs.insert(
+            node.name.clone(),
+            nas_csi_vm_manager::render_node_runtime_config(config, node)?,
+        );
+    }
+    Ok(configs)
+}
+
+fn install_node_runtime_configs(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+    node_configs: &BTreeMap<String, String>,
+) -> Result<()> {
+    for node in &config.nodes {
+        let contents = node_configs
+            .get(&node.name)
+            .ok_or_else(|| anyhow::anyhow!("missing rendered node config for {}", node.name))?;
+        guest_write_text_file(
+            runner,
+            options,
+            &node.domain,
+            NODE_RUNTIME_CONFIG_PATH,
+            contents,
+            0o644,
+        )
+        .with_context(|| format!("failed to install node runtime config on {}", node.name))?;
+        println!(
+            "csi install: installed {} on {}",
+            NODE_RUNTIME_CONFIG_PATH, node.name
+        );
+    }
+    Ok(())
+}
+
+fn guest_write_text_file(
+    runner: &impl CommandRunner,
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    path: &str,
+    contents: &str,
+    mode: u32,
+) -> Result<()> {
+    let parent = parent_dir_for_path(path);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(contents.as_bytes());
+    let script = format!(
+        "set -eu\numask 022\ninstall -d -m 0755 {}\nbase64 -d > {} <<'NAS_CSI_CONTENT'\n{}\nNAS_CSI_CONTENT\nchmod {:04o} {}\nsync {} 2>/dev/null || sync\n",
+        shell_quote(&parent),
+        shell_quote(path),
+        encoded,
+        mode,
+        shell_quote(path),
+        shell_quote(path)
+    );
+    let command = GuestCommandSpec::new("/bin/sh".to_string(), ["-c".to_string(), script]);
+    guest_exec_output(runner, options, domain, &command)?;
+    Ok(())
+}
+
+fn verify_node_runtime_configs(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+    node_configs: &BTreeMap<String, String>,
+) -> Result<()> {
+    for node in &config.nodes {
+        let expected = node_configs
+            .get(&node.name)
+            .ok_or_else(|| anyhow::anyhow!("missing rendered node config for {}", node.name))?;
+        let actual = guest_exec_output(
+            runner,
+            options,
+            &node.domain,
+            &GuestCommandSpec::new(
+                "/bin/cat".to_string(),
+                [NODE_RUNTIME_CONFIG_PATH.to_string()],
+            ),
+        )
+        .with_context(|| format!("failed to read node runtime config on {}", node.name))?;
+        if actual != *expected {
+            anyhow::bail!(
+                "{} on {} does not match host-local config",
+                NODE_RUNTIME_CONFIG_PATH,
+                node.name
+            );
+        }
+        println!(
+            "csi install: verified {} on {}",
+            NODE_RUNTIME_CONFIG_PATH, node.name
+        );
+    }
+    Ok(())
+}
+
+fn apply_nas_csi_manifest(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+    manifest_path: &Path,
+) -> Result<()> {
+    let path = manifest_path.display().to_string();
+    let command = csi_kubectl_command(
+        config,
+        options,
+        [
+            "apply".to_string(),
+            "--server-side".to_string(),
+            "-f".to_string(),
+            path.clone(),
+        ],
+    );
+    run_cluster_command(runner, &command)
+        .with_context(|| format!("failed to apply nas-csi manifest {path}"))?;
+    println!("csi install: applied nas-csi manifest {path}");
+    Ok(())
+}
+
+fn apply_generated_manifest(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+    path: &Path,
+    contents: &str,
+    label: &str,
+) -> Result<()> {
+    let path_string = path.display().to_string();
+    write_text_atomic_if_changed(&path_string, contents)?;
+    let command = csi_kubectl_command(
+        config,
+        options,
+        ["apply".to_string(), "-f".to_string(), path_string.clone()],
+    );
+    run_cluster_command(runner, &command).with_context(|| format!("failed to apply {label}"))?;
+    println!("csi install: applied {label} {path_string}");
+    Ok(())
+}
+
+fn wait_for_nas_csi_rollout(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    for resource in ["deployment/nas-csi-controller", "daemonset/nas-csi-node"] {
+        let command = csi_kubectl_command(
+            config,
+            options,
+            [
+                "-n".to_string(),
+                "kube-system".to_string(),
+                "rollout".to_string(),
+                "status".to_string(),
+                resource.to_string(),
+                format!("--timeout={}s", options.wait_timeout.as_secs()),
+            ],
+        );
+        wait_for_cluster_command_with_timeout(runner, &command, options.wait_timeout)
+            .with_context(|| format!("timed out waiting for {resource} rollout"))?;
+        println!("csi install: {resource} rollout is complete");
+    }
+    Ok(())
+}
+
+fn verify_guest_virtiofs_mounts(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    for node in &config.nodes {
+        for export_id in &node.exports {
+            let export = config
+                .exports
+                .get(export_id)
+                .ok_or_else(|| anyhow::anyhow!("missing export {export_id}"))?;
+            let mount_path = nas_csi_vm_manager::guest_virtiofs_mount_path(export_id);
+            let command = GuestCommandSpec::new(
+                "/bin/sh".to_string(),
+                [
+                    "-c".to_string(),
+                    virtiofs_mount_verify_script().to_string(),
+                    "nas-csi-verify".to_string(),
+                    mount_path.clone(),
+                    export.tag.clone(),
+                ],
+            );
+            if !guest_command_success(runner, options, &node.domain, &command)? {
+                anyhow::bail!(
+                    "guest virtiofs mount for export {export_id} on {} is not mounted from tag {} at {}",
+                    node.name,
+                    export.tag,
+                    mount_path
+                );
+            }
+            println!(
+                "csi install: verified guest virtiofs mount {}/{} at {}",
+                node.name, export_id, mount_path
+            );
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_smoke_pods(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    for export_id in config.exports.keys() {
+        let pod = smoke_pod_name(export_id);
+        let command = csi_kubectl_command(
+            config,
+            options,
+            [
+                "-n".to_string(),
+                options.namespace.clone(),
+                "wait".to_string(),
+                format!("pod/{pod}"),
+                "--for=condition=Ready".to_string(),
+                format!("--timeout={}s", options.wait_timeout.as_secs()),
+            ],
+        );
+        wait_for_cluster_command_with_timeout(runner, &command, options.wait_timeout)
+            .with_context(|| format!("timed out waiting for smoke pod {pod}"))?;
+        println!("csi install: smoke pod {pod} is Ready");
+    }
+    Ok(())
+}
+
+fn verify_pod_mounts(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    for (export_id, export) in &config.exports {
+        let pod = smoke_pod_name(export_id);
+        let mount_path = smoke_mount_path(export_id);
+        let command = kubectl_exec_command(
+            config,
+            options,
+            &pod,
+            [
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                virtiofs_mount_verify_script().to_string(),
+                "nas-csi-verify".to_string(),
+                mount_path.clone(),
+                export.tag.clone(),
+            ],
+        );
+        if !runner.status(&cluster_command_to_vm_command(&command))? {
+            anyhow::bail!(
+                "smoke pod {pod} does not have export {export_id} bind-mounted at {mount_path}"
+            );
+        }
+        println!("csi install: verified pod mount {pod}:{mount_path}");
+    }
+    Ok(())
+}
+
+fn verify_smoke_pod_restart(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+    smoke_manifest_path: &Path,
+    smoke_manifest: &str,
+) -> Result<()> {
+    let path_string = smoke_manifest_path.display().to_string();
+    let delete_command = csi_kubectl_command(
+        config,
+        options,
+        [
+            "delete".to_string(),
+            "-f".to_string(),
+            path_string.clone(),
+            "--ignore-not-found=true".to_string(),
+            "--wait=true".to_string(),
+        ],
+    );
+    run_cluster_command(runner, &delete_command).context("failed to delete CSI smoke pods")?;
+    apply_generated_manifest(
+        config,
+        options,
+        runner,
+        smoke_manifest_path,
+        smoke_manifest,
+        "CSI smoke pod manifest",
+    )?;
+    wait_for_smoke_pods(config, options, runner)?;
+    verify_pod_mounts(config, options, runner)?;
+    println!("csi install: verified smoke pod restart behavior");
+    Ok(())
+}
+
+fn verify_node_plugin_restart(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    let restart = csi_kubectl_command(
+        config,
+        options,
+        [
+            "-n".to_string(),
+            "kube-system".to_string(),
+            "rollout".to_string(),
+            "restart".to_string(),
+            "daemonset/nas-csi-node".to_string(),
+        ],
+    );
+    run_cluster_command(runner, &restart).context("failed to restart nas-csi node DaemonSet")?;
+    let status = csi_kubectl_command(
+        config,
+        options,
+        [
+            "-n".to_string(),
+            "kube-system".to_string(),
+            "rollout".to_string(),
+            "status".to_string(),
+            "daemonset/nas-csi-node".to_string(),
+            format!("--timeout={}s", options.wait_timeout.as_secs()),
+        ],
+    );
+    wait_for_cluster_command_with_timeout(runner, &status, options.wait_timeout)
+        .context("timed out waiting for nas-csi node DaemonSet after restart")?;
+    verify_pod_mounts(config, options, runner)?;
+    println!("csi install: verified node plugin restart behavior");
+    Ok(())
+}
+
+fn verify_missing_export_fails_closed(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+    missing_manifest_path: &Path,
+    missing_manifest: &str,
+) -> Result<()> {
+    apply_generated_manifest(
+        config,
+        options,
+        runner,
+        missing_manifest_path,
+        missing_manifest,
+        "missing export fail-closed probe manifest",
+    )?;
+    let pod = missing_export_pod_name();
+    let wait = csi_kubectl_command(
+        config,
+        options,
+        [
+            "-n".to_string(),
+            options.namespace.clone(),
+            "wait".to_string(),
+            format!("pod/{pod}"),
+            "--for=condition=Ready".to_string(),
+            "--timeout=30s".to_string(),
+        ],
+    );
+    let became_ready = runner.status(&cluster_command_to_vm_command(&wait))?;
+    let delete = csi_kubectl_command(
+        config,
+        options,
+        [
+            "delete".to_string(),
+            "-f".to_string(),
+            missing_manifest_path.display().to_string(),
+            "--ignore-not-found=true".to_string(),
+            "--wait=true".to_string(),
+        ],
+    );
+    let _ = runner.status(&cluster_command_to_vm_command(&delete));
+    if became_ready {
+        anyhow::bail!("missing export probe pod unexpectedly became Ready");
+    }
+    println!("csi install: verified missing virtiofs export fails closed");
+    Ok(())
+}
+
+fn verify_read_only_exports_are_mounted_read_only(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    for (export_id, export) in &config.exports {
+        if export.access != AccessMode::ReadOnly {
+            continue;
+        }
+        let pod = smoke_pod_name(export_id);
+        let mount_path = smoke_mount_path(export_id);
+        let command = kubectl_exec_command(
+            config,
+            options,
+            &pod,
+            [
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                readonly_mount_verify_script().to_string(),
+                "nas-csi-verify".to_string(),
+                mount_path.clone(),
+            ],
+        );
+        if !runner.status(&cluster_command_to_vm_command(&command))? {
+            anyhow::bail!("read-only export {export_id} is not mounted read-only in pod {pod}");
+        }
+        println!("csi install: verified read-only policy for {export_id} at {pod}:{mount_path}");
+    }
+    Ok(())
+}
+
+fn verify_pods_match_host_dataset_entries(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+) -> Result<()> {
+    for (export_id, export) in &config.exports {
+        let host_entries = host_top_level_entries(&export.source_path)
+            .with_context(|| format!("failed to list host dataset {}", export.source_path))?;
+        let pod_entries = pod_top_level_entries(config, options, runner, export_id)?;
+        if host_entries != pod_entries {
+            let diff = first_entry_diff(&host_entries, &pod_entries)
+                .unwrap_or_else(|| "entry lists differ".to_string());
+            anyhow::bail!(
+                "pod view for export {export_id} does not match host dataset {}; hostEntries={} podEntries={} firstDiff={diff}",
+                export.source_path,
+                host_entries.len(),
+                pod_entries.len()
+            );
+        }
+        println!("csi install: verified pod and host dataset entries match for {export_id}");
+    }
+    Ok(())
+}
+
+fn pod_top_level_entries(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    runner: &impl CommandRunner,
+    export_id: &str,
+) -> Result<Vec<String>> {
+    let pod = smoke_pod_name(export_id);
+    let mount_path = smoke_mount_path(export_id);
+    let command = kubectl_exec_command(
+        config,
+        options,
+        &pod,
+        [
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "cd \"$1\" && ls -A | sort".to_string(),
+            "nas-csi-list".to_string(),
+            mount_path,
+        ],
+    );
+    let vm_command = cluster_command_to_vm_command(&command);
+    if !runner.status(&vm_command)? {
+        anyhow::bail!("failed to list pod mount for export {export_id}");
+    }
+    let output = runner.output(&vm_command)?.unwrap_or_default();
+    Ok(parse_listing_output(&output))
+}
+
+fn host_top_level_entries(path: &str) -> Result<Vec<String>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read directory {path}"))? {
+        let entry =
+            entry.with_context(|| format!("failed to read directory entry under {path}"))?;
+        entries.push(entry.file_name().to_string_lossy().to_string());
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+fn parse_listing_output(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn first_entry_diff(host: &[String], pod: &[String]) -> Option<String> {
+    let max = host.len().max(pod.len());
+    for index in 0..max {
+        match (host.get(index), pod.get(index)) {
+            (Some(host), Some(pod)) if host != pod => {
+                return Some(format!("index={index} host={host:?} pod={pod:?}"));
+            }
+            (Some(host), None) => return Some(format!("index={index} host={host:?} pod=<none>")),
+            (None, Some(pod)) => return Some(format!("index={index} host=<none> pod={pod:?}")),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn render_static_existing_dataset_manifest(config: &HostConfig, namespace: &str) -> String {
+    let mut output = String::new();
+    for (index, (export_id, export)) in config.exports.iter().enumerate() {
+        if index > 0 {
+            output.push_str("---\n");
+        }
+        let name = existing_dataset_resource_name(export_id);
+        let access_mode = k8s_access_mode(export.access);
+        let node_affinity = render_pv_node_affinity(&node_names_for_export(config, export_id));
+        output.push_str(&format!(
+            "apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: {}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    nas-csi.dev/export-id: {}\nspec:\n  capacity:\n    storage: 1Ti\n  accessModes:\n    - {}\n  persistentVolumeReclaimPolicy: Retain\n  storageClassName: {}\n  volumeMode: Filesystem\n{}  claimRef:\n    namespace: {}\n    name: {}\n  csi:\n    driver: {}\n    volumeHandle: {}\n    volumeAttributes:\n      nas-csi.dev/exportId: {}\n      nas-csi.dev/dataset: {}\n      nas-csi.dev/sourcePath: {}\n      nas-csi.dev/tag: {}\n      nas-csi.dev/policy: {}\n      nas-csi.dev/access: {}\n      nas-csi.dev/readOnly: {}\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: {}\n  namespace: {}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    nas-csi.dev/export-id: {}\nspec:\n  storageClassName: {}\n  volumeName: {}\n  accessModes:\n    - {}\n  resources:\n    requests:\n      storage: 1Ti\n",
+            name,
+            yaml_quote(export_id),
+            access_mode,
+            EXISTING_DATASET_STORAGE_CLASS,
+            node_affinity,
+            yaml_quote(namespace),
+            name,
+            CSI_DRIVER_NAME,
+            yaml_quote(export_id),
+            yaml_quote(export_id),
+            yaml_quote(&export.dataset),
+            yaml_quote(&export.source_path),
+            yaml_quote(&export.tag),
+            yaml_quote(&export.policy),
+            yaml_quote(&export.access.to_string()),
+            yaml_quote(if export.access == AccessMode::ReadOnly { "true" } else { "false" }),
+            name,
+            yaml_quote(namespace),
+            yaml_quote(export_id),
+            EXISTING_DATASET_STORAGE_CLASS,
+            name,
+            access_mode
+        ));
+    }
+    output
+}
+
+fn render_csi_smoke_pod_manifest(config: &HostConfig, options: &CsiInstallOptions) -> String {
+    let mut output = String::new();
+    for (index, (export_id, export)) in config.exports.iter().enumerate() {
+        if index > 0 {
+            output.push_str("---\n");
+        }
+        let pod = smoke_pod_name(export_id);
+        let pvc = existing_dataset_resource_name(export_id);
+        let node = node_for_export(config, export_id).expect("validated export node");
+        output.push_str(&format!(
+            "apiVersion: v1\nkind: Pod\nmetadata:\n  name: {}\n  namespace: {}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    app.kubernetes.io/component: smoke\n    nas-csi.dev/export-id: {}\nspec:\n  restartPolicy: Always\n  nodeName: {}\n  containers:\n    - name: smoke\n      image: {}\n      command:\n        - /bin/sh\n        - -c\n        - {}\n      volumeMounts:\n        - name: dataset\n          mountPath: {}\n          readOnly: {}\n  volumes:\n    - name: dataset\n      persistentVolumeClaim:\n        claimName: {}\n        readOnly: {}\n",
+            pod,
+            yaml_quote(&options.namespace),
+            yaml_quote(export_id),
+            yaml_quote(&node.name),
+            yaml_quote(&options.smoke_image),
+            yaml_quote("trap : TERM INT; sleep 2147483647 & wait"),
+            smoke_mount_path(export_id),
+            export.access == AccessMode::ReadOnly,
+            pvc,
+            export.access == AccessMode::ReadOnly
+        ));
+    }
+    output
+}
+
+fn render_missing_export_manifest(config: &HostConfig, options: &CsiInstallOptions) -> String {
+    let pod = missing_export_pod_name();
+    let node = &config.nodes[0];
+    format!(
+        "apiVersion: v1\nkind: PersistentVolume\nmetadata:\n  name: {pod}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    nas-csi.dev/probe: missing-export\nspec:\n  capacity:\n    storage: 1Gi\n  accessModes:\n    - ReadWriteMany\n  persistentVolumeReclaimPolicy: Retain\n  storageClassName: {EXISTING_DATASET_STORAGE_CLASS}\n  volumeMode: Filesystem\n  claimRef:\n    namespace: {}\n    name: {pod}\n  csi:\n    driver: {CSI_DRIVER_NAME}\n    volumeHandle: {MISSING_EXPORT_ID}\n    volumeAttributes:\n      nas-csi.dev/exportId: {MISSING_EXPORT_ID}\n      nas-csi.dev/dataset: tank/nas-csi-missing-export\n      nas-csi.dev/sourcePath: /var/empty/nas-csi-missing-export\n      nas-csi.dev/tag: nas_csi_missing_export\n      nas-csi.dev/policy: missing-export-probe\n      nas-csi.dev/access: read-write\n      nas-csi.dev/readOnly: \"false\"\n---\napiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: {pod}\n  namespace: {}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    nas-csi.dev/probe: missing-export\nspec:\n  storageClassName: {EXISTING_DATASET_STORAGE_CLASS}\n  volumeName: {pod}\n  accessModes:\n    - ReadWriteMany\n  resources:\n    requests:\n      storage: 1Gi\n---\napiVersion: v1\nkind: Pod\nmetadata:\n  name: {pod}\n  namespace: {}\n  labels:\n    app.kubernetes.io/name: nas-csi\n    app.kubernetes.io/component: missing-export-probe\nspec:\n  restartPolicy: Never\n  nodeName: {}\n  containers:\n    - name: smoke\n      image: {}\n      command:\n        - /bin/sh\n        - -c\n        - {}\n      volumeMounts:\n        - name: dataset\n          mountPath: /mnt/nas-csi/missing-export\n  volumes:\n    - name: dataset\n      persistentVolumeClaim:\n        claimName: {pod}\n",
+        yaml_quote(&options.namespace),
+        yaml_quote(&options.namespace),
+        yaml_quote(&options.namespace),
+        yaml_quote(&node.name),
+        yaml_quote(&options.smoke_image),
+        yaml_quote("sleep 30"),
+    )
+}
+
+fn print_csi_install_plan(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    nas_csi_manifest_path: &Path,
+    static_manifest_path: &Path,
+    smoke_manifest_path: &Path,
+) {
+    println!("csi install plan");
+    println!();
+    println!("nodes: {}", config.nodes.len());
+    println!("exports: {}", config.exports.len());
+    println!("namespace: {}", options.namespace);
+    println!("nas-csi manifest: {}", nas_csi_manifest_path.display());
+    println!("static PV/PVC manifest: {}", static_manifest_path.display());
+    println!("smoke pod manifest: {}", smoke_manifest_path.display());
+    println!();
+    for (export_id, export) in &config.exports {
+        let node = node_for_export(config, export_id)
+            .map(|node| node.name.as_str())
+            .unwrap_or("none");
+        println!(
+            "- {export_id}: dataset={} source={} access={} smokeNode={node}",
+            export.dataset, export.source_path, export.access
+        );
+    }
+}
+
+fn verify_nas_csi_manifest_uses_lab_images(contents: &str) -> Result<()> {
+    for image in [LAB_CONTROLLER_IMAGE, LAB_NODE_IMAGE] {
+        if !contents.contains(image) {
+            anyhow::bail!("nas-csi manifest does not use required lab image {image}");
+        }
+    }
+    Ok(())
+}
+
+fn csi_kubectl_command<I>(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    args: I,
+) -> ClusterCommandSpec
+where
+    I: IntoIterator<Item = String>,
+{
+    kubectl_command(config, &options.kubectl, args)
+}
+
+fn kubectl_command<I>(config: &HostConfig, kubectl: &str, args: I) -> ClusterCommandSpec
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut command_args = vec![
+        "--kubeconfig".to_string(),
+        config.cluster.kubeconfig_out.clone(),
+    ];
+    command_args.extend(args);
+    ClusterCommandSpec::new(kubectl.to_string(), command_args)
+}
+
+fn kubectl_exec_command<I>(
+    config: &HostConfig,
+    options: &CsiInstallOptions,
+    pod: &str,
+    args: I,
+) -> ClusterCommandSpec
+where
+    I: IntoIterator<Item = String>,
+{
+    kubectl_exec_command_in_namespace(config, &options.kubectl, &options.namespace, pod, args)
+}
+
+fn kubectl_exec_command_in_namespace<I>(
+    config: &HostConfig,
+    kubectl: &str,
+    namespace: &str,
+    pod: &str,
+    args: I,
+) -> ClusterCommandSpec
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut command_args = vec![
+        "-n".to_string(),
+        namespace.to_string(),
+        "exec".to_string(),
+        pod.to_string(),
+        "--".to_string(),
+    ];
+    command_args.extend(args);
+    kubectl_command(config, kubectl, command_args)
+}
+
+fn virtiofs_mount_verify_script() -> &'static str {
+    r#"awk -v mp="$1" -v src="$2" '
+$5 == mp {
+    sep = 0
+    for (i = 1; i <= NF; i++) {
+        if ($i == "-") {
+            sep = i
+            break
+        }
+    }
+    if (sep && $(sep + 1) == "virtiofs" && $(sep + 2) == src) {
+        found = 1
+    }
+}
+END { exit found ? 0 : 1 }
+' /proc/self/mountinfo"#
+}
+
+fn readonly_mount_verify_script() -> &'static str {
+    r#"awk -v mp="$1" '
+$5 == mp {
+    split($6, options, ",")
+    for (i in options) {
+        if (options[i] == "ro") {
+            found = 1
+        }
+    }
+}
+END { exit found ? 0 : 1 }
+' /proc/self/mountinfo"#
+}
+
+fn node_for_export<'a>(config: &'a HostConfig, export_id: &str) -> Option<&'a NodeConfig> {
+    config.nodes.iter().find(|node| {
+        node.exports
+            .iter()
+            .any(|node_export| node_export == export_id)
+    })
+}
+
+fn node_names_for_export(config: &HostConfig, export_id: &str) -> Vec<String> {
+    config
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.exports
+                .iter()
+                .any(|node_export| node_export == export_id)
+        })
+        .map(|node| node.name.clone())
+        .collect()
+}
+
+fn render_pv_node_affinity(node_names: &[String]) -> String {
+    if node_names.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from(
+        "  nodeAffinity:\n    required:\n      nodeSelectorTerms:\n        - matchExpressions:\n            - key: kubernetes.io/hostname\n              operator: In\n              values:\n",
+    );
+    for node_name in node_names {
+        output.push_str(&format!("                - {}\n", yaml_quote(node_name)));
+    }
+    output
+}
+
+fn existing_dataset_resource_name(export_id: &str) -> String {
+    safe_k8s_name("nas-csi", export_id)
+}
+
+fn smoke_pod_name(export_id: &str) -> String {
+    safe_k8s_name("nas-csi-smoke", export_id)
+}
+
+fn missing_export_pod_name() -> String {
+    safe_k8s_name("nas-csi", MISSING_EXPORT_ID)
+}
+
+fn smoke_mount_path(export_id: &str) -> String {
+    format!("/mnt/nas-csi/{}", safe_mount_segment(export_id))
+}
+
+fn k8s_access_mode(access: AccessMode) -> &'static str {
+    match access {
+        AccessMode::ReadWrite => "ReadWriteMany",
+        AccessMode::ReadOnly => "ReadOnlyMany",
+    }
+}
+
+fn safe_k8s_name(prefix: &str, value: &str) -> String {
+    let body = safe_k8s_body(value);
+    let candidate = format!("{prefix}-{body}");
+    if candidate.len() <= 63 {
+        return candidate;
+    }
+
+    let hash = &sha256_hex(value.as_bytes())[..8];
+    let max_body_len = 63usize.saturating_sub(prefix.len() + 10).max(1);
+    let truncated = trim_k8s_hyphens(&body.chars().take(max_body_len).collect::<String>());
+    format!("{prefix}-{truncated}-{hash}")
+}
+
+fn safe_k8s_body(value: &str) -> String {
+    let mut output = String::new();
+    let mut last_was_dash = false;
+    for ch in value.chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            last_was_dash = false;
+            ch.to_ascii_lowercase()
+        } else if last_was_dash {
+            continue;
+        } else {
+            last_was_dash = true;
+            '-'
+        };
+        output.push(next);
+    }
+    let output = trim_k8s_hyphens(&output);
+    if output.is_empty() {
+        "x".to_string()
+    } else {
+        output
+    }
+}
+
+fn trim_k8s_hyphens(value: &str) -> String {
+    value.trim_matches('-').to_string()
+}
+
+fn safe_mount_segment(value: &str) -> String {
+    let mut output = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            output.push(ch);
+        } else {
+            output.push('_');
+        }
+    }
+    if output.is_empty() {
+        "export".to_string()
+    } else {
+        output
+    }
+}
+
+fn yaml_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn verify_substrate_manifest_scope(manifests: &[DesiredManifest]) -> Result<()> {
+    for manifest in manifests {
+        if manifest.name != "metrics-server" && manifest.name != "nas-csi" {
+            log_cluster_reconcile_refusal(
+                "verify_substrate_manifest_scope",
+                &format!("non-substrate manifest {}", manifest.name),
+            );
+            anyhow::bail!(
+                "cluster install refuses non-substrate manifest {}",
+                manifest.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_cluster_plan_order(config: &HostConfig, plan: &ClusterReconcilePlan) -> Result<()> {
+    let first_server = config
+        .nodes
+        .iter()
+        .find(|node| node.role == NodeRole::Server && node.k3s.cluster_init)
+        .or_else(|| {
+            config
+                .nodes
+                .iter()
+                .find(|node| node.role == NodeRole::Server)
+        })
+        .ok_or_else(|| anyhow::anyhow!("cluster install requires at least one server node"))?;
+
+    let first_start_index = plan.steps.iter().position(|step| {
+        matches!(
+            &step.kind,
+            ClusterReconcileStepKind::Apply(ClusterOperation::StartFirstServer { node, .. })
+                if node == &first_server.name
+        ) || matches!(
+            &step.kind,
+            ClusterReconcileStepKind::SkipAlreadyCorrect { .. }
+        ) && step
+            .description
+            .contains(&format!("first k3s server {}", first_server.name))
+    });
+
+    for node in &config.nodes {
+        if node.name == first_server.name {
+            continue;
+        }
+        let Some(join_index) = plan.steps.iter().position(|step| {
+            matches!(
+                &step.kind,
+                ClusterReconcileStepKind::Apply(ClusterOperation::StartJoinNode { node: planned, .. })
+                    if planned == &node.name
+            ) || matches!(
+                &step.kind,
+                ClusterReconcileStepKind::SkipAlreadyCorrect { .. }
+            ) && step
+                .description
+                .contains(&format!("k3s join node {}", node.name))
+        }) else {
+            continue;
+        };
+        if let Some(first_start_index) = first_start_index
+            && join_index <= first_start_index
+        {
+            anyhow::bail!(
+                "cluster install plan starts join node {} before first server {}",
+                node.name,
+                first_server.name
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_cluster_install_state(
+    config: &HostConfig,
+    actual: &ClusterActualState,
+    manifests: &[DesiredManifest],
+    options: &ClusterReconcileOptions,
+) -> Result<()> {
+    if !actual.token_present {
+        anyhow::bail!("k3s token is missing or invalid");
+    }
+    verify_private_file(&config.cluster.token_file, "k3s token")?;
+
+    if !actual.kubeconfig_present {
+        anyhow::bail!("host kubeconfig is missing");
+    }
+    verify_private_file(&config.cluster.kubeconfig_out, "kubeconfig")?;
+    let kubeconfig = fs::read_to_string(&config.cluster.kubeconfig_out).with_context(|| {
+        format!(
+            "failed to read kubeconfig {}",
+            config.cluster.kubeconfig_out
+        )
+    })?;
+    if !kubeconfig.contains(&format!("server: {}", config.cluster.api_server.endpoint)) {
+        anyhow::bail!(
+            "kubeconfig does not point at configured endpoint {}",
+            config.cluster.api_server.endpoint
+        );
+    }
+
+    if !actual.api_ready {
+        anyhow::bail!("Kubernetes API readiness check is not passing");
+    }
+
+    for node in &config.nodes {
+        let state = actual
+            .nodes
+            .get(&node.name)
+            .ok_or_else(|| anyhow::anyhow!("missing cluster state for node {}", node.name))?;
+        if !state.domain_running {
+            anyhow::bail!("node domain is not running: {}", node.name);
+        }
+        if !state.k3s_ready {
+            anyhow::bail!("k3s service is not ready on node {}", node.name);
+        }
+        if !state.kubernetes_ready {
+            anyhow::bail!("Kubernetes node is not Ready: {}", node.name);
+        }
+        for (key, value) in &node.k3s.labels {
+            if state.labels.get(key) != Some(value) {
+                anyhow::bail!(
+                    "node {} label {} does not match desired value {}",
+                    node.name,
+                    key,
+                    value
+                );
+            }
+        }
+        let actual_taints = state
+            .taints
+            .iter()
+            .map(node_taint_key)
+            .collect::<BTreeSet<_>>();
+        for taint in &node.k3s.taints {
+            if !actual_taints.contains(&node_taint_key(taint)) {
+                anyhow::bail!("node {} missing taint {}", node.name, node_taint_key(taint));
+            }
+        }
+    }
+
+    for manifest in manifests {
+        let desired_hash = manifest.desired_hash();
+        let applied = actual.applied_manifests.get(&manifest.name);
+        if applied != Some(&desired_hash) {
+            anyhow::bail!(
+                "substrate manifest {} is not applied at desired hash via marker {}",
+                manifest.name,
+                nas_csi_cluster_manager::manifest_marker_path(options, &manifest.name)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_private_file(path: &str, label: &str) -> Result<()> {
+    let metadata = fs::metadata(path).with_context(|| format!("{label} file missing: {path}"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{label} path is not a file: {path}");
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        anyhow::bail!("{label} file {path} must not be group/world accessible; mode={mode:o}");
+    }
+    Ok(())
+}
+
+fn node_taint_key(taint: &NodeTaint) -> String {
+    format!("{}={}:{}", taint.key, taint.value, taint.effect)
+}
+
+fn verify_cluster_install_idempotence(plan: &ClusterReconcilePlan) -> Result<()> {
+    if plan.is_current() {
+        return Ok(());
+    }
+    let mut apply = 0usize;
+    for step in &plan.steps {
+        if matches!(step.kind, ClusterReconcileStepKind::Apply(_)) {
+            apply += 1;
+        }
+    }
+    log_cluster_reconcile_refusal(
+        "verify_cluster_install_idempotence",
+        &format!("post-execute plan still has {apply} apply step(s)"),
+    );
+    anyhow::bail!("cluster install was not idempotent after execute: apply={apply}");
+}
+
+fn reboot_cluster_node(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    runner: &impl CommandRunner,
+    node_name: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let node = config
+        .nodes
+        .iter()
+        .find(|node| node.name == node_name)
+        .ok_or_else(|| anyhow::anyhow!("unknown node requested for reboot: {node_name}"))?;
+    let reboot = ClusterCommandSpec::new(
+        options.virsh_path.clone(),
+        [
+            "-c".to_string(),
+            options.libvirt_uri.clone(),
+            "reboot".to_string(),
+            node.domain.clone(),
+        ],
+    );
+    run_cluster_command(runner, &reboot)
+        .with_context(|| format!("failed to request reboot for node {}", node.name))?;
+
+    let service_name = match node.role {
+        NodeRole::Server => "k3s",
+        NodeRole::Agent => "k3s-agent",
+    };
+    wait_for_guest_command_tolerant(
+        runner,
+        options,
+        &node.domain,
+        &GuestCommandSpec::new(
+            "/bin/systemctl".to_string(),
+            [
+                "is-active".to_string(),
+                "--quiet".to_string(),
+                service_name.to_string(),
+            ],
+        ),
+        timeout,
+    )?;
+    wait_for_cluster_command_with_timeout(
+        runner,
+        &cluster_ready_command(config, options),
+        timeout,
+    )?;
+    wait_for_cluster_command_with_timeout(
+        runner,
+        &node_ready_command(config, options, &node.name, timeout),
+        timeout,
+    )?;
+    println!("cluster install: node {} returned after reboot", node.name);
+    Ok(())
+}
+
+fn cluster_ready_command(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+) -> ClusterCommandSpec {
+    ClusterCommandSpec::new(
+        options.kubectl_path.clone(),
+        [
+            "--kubeconfig".to_string(),
+            config.cluster.kubeconfig_out.clone(),
+            "get".to_string(),
+            "--raw=/readyz".to_string(),
+        ],
+    )
+}
+
+fn node_ready_command(
+    config: &HostConfig,
+    options: &ClusterReconcileOptions,
+    node_name: &str,
+    timeout: Duration,
+) -> ClusterCommandSpec {
+    ClusterCommandSpec::new(
+        options.kubectl_path.clone(),
+        [
+            "--kubeconfig".to_string(),
+            config.cluster.kubeconfig_out.clone(),
+            "wait".to_string(),
+            "node".to_string(),
+            node_name.to_string(),
+            "--for=condition=Ready".to_string(),
+            format!("--timeout={}s", timeout.as_secs()),
+        ],
+    )
 }
 
 fn cluster_options_from_config(
@@ -768,15 +3651,23 @@ fn execute_cluster_reconcile_plan(
     options: &ClusterReconcileOptions,
     runner: &impl CommandRunner,
 ) -> Result<()> {
-    for step in &plan.steps {
+    for (index, step) in plan.steps.iter().enumerate() {
         match &step.kind {
             ClusterReconcileStepKind::SkipAlreadyCorrect { reason } => {
+                log_cluster_reconcile_skip(index + 1, step, reason);
                 println!("skip {}: {reason}", step.description);
             }
             ClusterReconcileStepKind::Apply(operation) => {
                 println!("{}", step.description);
-                execute_cluster_operation(operation, options, runner)
-                    .with_context(|| format!("failed cluster step: {}", step.description))?;
+                log_cluster_operation_start(index + 1, step, operation);
+                match execute_cluster_operation(operation, options, runner) {
+                    Ok(()) => log_cluster_operation_finish(index + 1, step, operation),
+                    Err(error) => {
+                        log_cluster_operation_failure(index + 1, step, operation, &error);
+                        return Err(error)
+                            .with_context(|| format!("failed cluster step: {}", step.description));
+                    }
+                }
             }
         }
     }
@@ -870,7 +3761,15 @@ fn wait_for_cluster_command(
     runner: &impl CommandRunner,
     command: &ClusterCommandSpec,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(600);
+    wait_for_cluster_command_with_timeout(runner, command, Duration::from_secs(600))
+}
+
+fn wait_for_cluster_command_with_timeout(
+    runner: &impl CommandRunner,
+    command: &ClusterCommandSpec,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     loop {
         if runner.status(&cluster_command_to_vm_command(command))? {
             return Ok(());
@@ -891,10 +3790,40 @@ fn wait_for_guest_command(
     domain: &str,
     command: &GuestCommandSpec,
 ) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(600);
+    wait_for_guest_command_with_timeout(runner, options, domain, command, Duration::from_secs(600))
+}
+
+fn wait_for_guest_command_with_timeout(
+    runner: &impl CommandRunner,
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    command: &GuestCommandSpec,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     loop {
         if guest_command_success(runner, options, domain, command)? {
             return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for guest command on {domain}");
+        }
+        thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn wait_for_guest_command_tolerant(
+    runner: &impl CommandRunner,
+    options: &ClusterReconcileOptions,
+    domain: &str,
+    command: &GuestCommandSpec,
+    timeout: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match guest_command_success(runner, options, domain, command) {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(_) => {}
         }
         if Instant::now() >= deadline {
             anyhow::bail!("timed out waiting for guest command on {domain}");
@@ -1085,6 +4014,14 @@ where
         print!("{yaml}");
     }
     Ok(())
+}
+
+fn write_yaml_atomic_if_changed<T>(path: &Path, value: &T) -> Result<WriteOutcome>
+where
+    T: serde::Serialize,
+{
+    let yaml = serde_yml::to_string(value).context("failed to serialize yaml")?;
+    write_text_atomic_if_changed(&path.display().to_string(), &yaml)
 }
 
 fn write_artifacts(output_dir: &Path, files: &[nas_csi_vm_manager::RenderedFile]) -> Result<()> {
@@ -1404,6 +4341,97 @@ fn log_reconcile_decisions(plan: &nas_csi_vm_manager::HostReconcilePlan) {
     }
 }
 
+fn log_cluster_reconcile_decisions(plan: &ClusterReconcilePlan) {
+    for (index, step) in plan.steps.iter().enumerate() {
+        match &step.kind {
+            ClusterReconcileStepKind::Apply(operation) => {
+                structured_log(serde_json::json!({
+                    "event": "cluster_reconcile_decision",
+                    "stepIndex": index + 1,
+                    "decision": "apply",
+                    "description": step.description,
+                    "operation": cluster_operation_name(operation),
+                }));
+            }
+            ClusterReconcileStepKind::SkipAlreadyCorrect { reason } => {
+                structured_log(serde_json::json!({
+                    "event": "cluster_reconcile_decision",
+                    "stepIndex": index + 1,
+                    "decision": "skip",
+                    "description": step.description,
+                    "reason": reason,
+                }));
+            }
+        }
+    }
+}
+
+fn log_cluster_reconcile_skip(
+    index: usize,
+    step: &nas_csi_cluster_manager::ClusterReconcileStep,
+    reason: &str,
+) {
+    structured_log(serde_json::json!({
+        "event": "cluster_reconcile_skip",
+        "stepIndex": index,
+        "description": step.description,
+        "reason": reason,
+        "result": "success",
+    }));
+}
+
+fn log_cluster_operation_start(
+    index: usize,
+    step: &nas_csi_cluster_manager::ClusterReconcileStep,
+    operation: &ClusterOperation,
+) {
+    structured_log(serde_json::json!({
+        "event": "cluster_reconcile_operation_start",
+        "stepIndex": index,
+        "description": step.description,
+        "operation": cluster_operation_name(operation),
+    }));
+}
+
+fn log_cluster_operation_finish(
+    index: usize,
+    step: &nas_csi_cluster_manager::ClusterReconcileStep,
+    operation: &ClusterOperation,
+) {
+    structured_log(serde_json::json!({
+        "event": "cluster_reconcile_operation_finish",
+        "stepIndex": index,
+        "description": step.description,
+        "operation": cluster_operation_name(operation),
+        "result": "success",
+    }));
+}
+
+fn log_cluster_operation_failure(
+    index: usize,
+    step: &nas_csi_cluster_manager::ClusterReconcileStep,
+    operation: &ClusterOperation,
+    error: &anyhow::Error,
+) {
+    structured_log(serde_json::json!({
+        "event": "cluster_reconcile_operation_finish",
+        "stepIndex": index,
+        "description": step.description,
+        "operation": cluster_operation_name(operation),
+        "result": "failure",
+        "error": error.to_string(),
+    }));
+}
+
+fn log_cluster_reconcile_refusal(reason: &str, detail: &str) {
+    structured_log(serde_json::json!({
+        "event": "cluster_reconcile_refusal",
+        "decision": "refuse",
+        "reason": reason,
+        "detail": detail,
+    }));
+}
+
 fn reconcile_operation_name(operation: &nas_csi_vm_manager::ReconcileOperation) -> &'static str {
     match operation {
         nas_csi_vm_manager::ReconcileOperation::EnsureDirectory { .. } => "EnsureDirectory",
@@ -1436,12 +4464,28 @@ fn reconcile_operation_name(operation: &nas_csi_vm_manager::ReconcileOperation) 
     }
 }
 
+fn cluster_operation_name(operation: &ClusterOperation) -> &'static str {
+    match operation {
+        ClusterOperation::EnsureToken { .. } => "EnsureToken",
+        ClusterOperation::StartFirstServer { .. } => "StartFirstServer",
+        ClusterOperation::WaitForFirstServer { .. } => "WaitForFirstServer",
+        ClusterOperation::RetrieveKubeconfig { .. } => "RetrieveKubeconfig",
+        ClusterOperation::WaitForClusterApi { .. } => "WaitForClusterApi",
+        ClusterOperation::StartJoinNode { .. } => "StartJoinNode",
+        ClusterOperation::WaitForNodeReady { .. } => "WaitForNodeReady",
+        ClusterOperation::ReconcileNodeLabels { .. } => "ReconcileNodeLabels",
+        ClusterOperation::ReconcileNodeTaints { .. } => "ReconcileNodeTaints",
+        ClusterOperation::ApplyAddon { .. } => "ApplyAddon",
+        ClusterOperation::ApplyNasCsi { .. } => "ApplyNasCsi",
+    }
+}
+
 fn log_command_start(kind: &str, command: &nas_csi_vm_manager::CommandSpec) {
     structured_log(serde_json::json!({
         "event": "command_start",
         "kind": kind,
         "program": command.program,
-        "args": command.args,
+        "args": sanitized_command_args(command),
     }));
 }
 
@@ -1455,7 +4499,7 @@ fn log_command_finish(
         "event": "command_finish",
         "kind": kind,
         "program": command.program,
-        "args": command.args,
+        "args": sanitized_command_args(command),
         "success": success,
         "exitCode": exit_code,
     }));
@@ -1466,13 +4510,77 @@ fn log_command_error(kind: &str, command: &nas_csi_vm_manager::CommandSpec, erro
         "event": "command_error",
         "kind": kind,
         "program": command.program,
-        "args": command.args,
+        "args": sanitized_command_args(command),
         "error": error,
     }));
 }
 
 fn structured_log(value: serde_json::Value) {
     eprintln!("{value}");
+}
+
+fn sanitized_command_args(command: &nas_csi_vm_manager::CommandSpec) -> Vec<String> {
+    let qemu_agent_index = command
+        .args
+        .iter()
+        .position(|arg| arg == "qemu-agent-command");
+    let mut redact_next = false;
+    let mut sanitized = Vec::with_capacity(command.args.len());
+    for (index, arg) in command.args.iter().enumerate() {
+        if qemu_agent_index.is_some_and(|qemu_index| index > qemu_index + 1) {
+            sanitized.push("[REDACTED_QEMU_AGENT_PAYLOAD]".to_string());
+            continue;
+        }
+        if redact_next {
+            sanitized.push("[REDACTED]".to_string());
+            redact_next = false;
+            continue;
+        }
+        if is_sensitive_command_flag(arg) {
+            sanitized.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+        if let Some((key, _value)) = arg.split_once('=')
+            && is_sensitive_command_flag(key)
+        {
+            sanitized.push(format!("{key}=[REDACTED]"));
+            continue;
+        }
+        sanitized.push(sanitized_command_arg(arg));
+    }
+    sanitized
+}
+
+fn is_sensitive_command_flag(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--api-key"
+            | "--apiKey"
+            | "--api-key-file"
+            | "--apiKeyFile"
+            | "--kubeconfig"
+            | "--password"
+            | "--token"
+    )
+}
+
+fn sanitized_command_arg(arg: &str) -> String {
+    if arg.contains("NAS_CSI_CONTENT") {
+        return "[REDACTED_FILE_CONTENT]".to_string();
+    }
+    if arg.len() > 512 {
+        return format!("[REDACTED_LONG_ARG:{} bytes]", arg.len());
+    }
+    arg.to_string()
+}
+
+fn command_log_display(command: &nas_csi_vm_manager::CommandSpec) -> String {
+    let sanitized = nas_csi_vm_manager::CommandSpec::new(
+        command.program.clone(),
+        sanitized_command_args(command),
+    );
+    sanitized.to_string()
 }
 
 trait CommandRunner {
@@ -1483,7 +4591,7 @@ trait CommandRunner {
         if self.status(command)? {
             Ok(())
         } else {
-            anyhow::bail!("{command} failed")
+            anyhow::bail!("{} failed", command_log_display(command))
         }
     }
 }
@@ -3211,11 +6319,15 @@ fn sync_directory(path: &Path) -> Result<()> {
 }
 
 fn wait_for_virtiofs_socket(path: &str) -> Result<()> {
+    wait_for_virtiofs_socket_with_timeout(path, Duration::from_secs(5))
+}
+
+fn wait_for_virtiofs_socket_with_timeout(path: &str, timeout: Duration) -> Result<()> {
     if path.is_empty() {
         anyhow::bail!("virtiofs socket path is empty");
     }
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
     loop {
         match fs::metadata(path) {
             Ok(metadata) if metadata.file_type().is_socket() => return Ok(()),
@@ -3636,6 +6748,515 @@ mod tests {
             mountinfo_mount_point(line).as_deref(),
             Some("/mnt/pool/repos dev")
         );
+    }
+
+    #[test]
+    fn host_install_refuses_writes_under_exported_datasets() {
+        let config = sample_host_config();
+        let export = config.exports.get("repos").expect("repos export");
+        let forbidden_path = Path::new(&export.source_path).join("vm-state");
+        let plan = nas_csi_vm_manager::HostReconcilePlan {
+            steps: vec![nas_csi_vm_manager::ReconcileStep {
+                description: "write under exported dataset".to_string(),
+                kind: nas_csi_vm_manager::ReconcileStepKind::Apply(
+                    nas_csi_vm_manager::ReconcileOperation::EnsureDirectory {
+                        path: forbidden_path.display().to_string(),
+                    },
+                ),
+            }],
+        };
+
+        let error =
+            verify_no_dataset_mutating_operations(&config, &plan).expect_err("dataset guard");
+
+        assert!(error.to_string().contains("exported dataset"));
+    }
+
+    #[test]
+    fn host_install_idempotence_rejects_remaining_apply_steps() {
+        let plan = nas_csi_vm_manager::HostReconcilePlan {
+            steps: vec![nas_csi_vm_manager::ReconcileStep {
+                description: "still needs root disk".to_string(),
+                kind: nas_csi_vm_manager::ReconcileStepKind::Apply(
+                    nas_csi_vm_manager::ReconcileOperation::CreateRootDisk {
+                        path: "/var/lib/nas-csi/node.qcow2".to_string(),
+                        command: nas_csi_vm_manager::CommandSpec::new(
+                            "qemu-img",
+                            ["create".to_string()],
+                        ),
+                    },
+                ),
+            }],
+        };
+
+        let error = verify_post_install_idempotence(&plan).expect_err("not idempotent");
+
+        assert!(error.to_string().contains("not idempotent"));
+    }
+
+    #[test]
+    fn host_install_verifies_complete_post_apply_state() {
+        let config = sample_host_config();
+        let root = unique_test_dir("host-install-state");
+        let mut render_options = render_options_from_config(&config);
+        render_options.runtime_dir = root.join("run").display().to_string();
+        let mut apply_options = apply_options_from_config(
+            &config,
+            &root.join("artifacts"),
+            &root.join("systemd"),
+            false,
+            false,
+        );
+        apply_options.start_domains = true;
+        let desired_apply =
+            nas_csi_vm_manager::plan_host_apply(&config, &render_options, &apply_options)
+                .expect("desired apply");
+        let seed_hashes = expected_seed_hashes(&desired_apply);
+
+        let mut actual = nas_csi_vm_manager::HostActualState::default();
+        let mut socket_listeners = Vec::new();
+        for node in &config.nodes {
+            actual.paths.insert(
+                node.root_disk.image.clone(),
+                nas_csi_vm_manager::PathActualState::file(b"root-disk"),
+            );
+            actual.qemu_images.insert(
+                node.root_disk.image.clone(),
+                nas_csi_vm_manager::QemuImageActualState {
+                    format: Some("qcow2".to_string()),
+                    backing_file: node.root_disk.source_image.clone(),
+                    virtual_size: Some(node.root_disk.size_gib * 1024 * 1024 * 1024),
+                },
+            );
+
+            let seed_path =
+                nas_csi_vm_manager::seed_image_path(&node.root_disk.image, &node.domain);
+            actual.paths.insert(
+                seed_path.clone(),
+                nas_csi_vm_manager::PathActualState {
+                    kind: nas_csi_vm_manager::PathActualKind::File,
+                    size: Some(1),
+                    content_hash: seed_hashes.get(&seed_path).cloned(),
+                    sha256: None,
+                },
+            );
+
+            actual.domains.insert(
+                node.domain.clone(),
+                nas_csi_vm_manager::DomainActualState {
+                    exists: true,
+                    managed: true,
+                    active: true,
+                    autostart: Some(node.autostart),
+                    desired_hash: Some("desired".to_string()),
+                    xml: Some("<domain/>".to_string()),
+                    xml_hash: Some("xml".to_string()),
+                },
+            );
+
+            for export_id in &node.exports {
+                let unit_name = format!(
+                    "{}.service",
+                    nas_csi_vm_manager::virtiofsd_service_name(&node.domain, export_id)
+                );
+                actual.systemd_units.insert(
+                    unit_name,
+                    nas_csi_vm_manager::SystemdUnitActualState {
+                        installed_hash: Some("unit".to_string()),
+                        enabled: Some(true),
+                        active: Some(true),
+                    },
+                );
+
+                let socket_path = nas_csi_vm_manager::virtiofs_socket_path(
+                    &render_options,
+                    &node.domain,
+                    export_id,
+                );
+                let socket_path = PathBuf::from(socket_path);
+                fs::create_dir_all(socket_path.parent().expect("socket parent"))
+                    .expect("create socket parent");
+                socket_listeners.push(UnixListener::bind(&socket_path).expect("bind socket"));
+            }
+        }
+
+        let health = HostHealthReport {
+            status: "ok".to_string(),
+            tools: Vec::new(),
+            systemd_units: Vec::new(),
+            libvirt_domains: Vec::new(),
+            virtiofs_sockets: Vec::new(),
+            datasets: Vec::new(),
+        };
+
+        verify_host_install_state(
+            &config,
+            &desired_apply,
+            &apply_options,
+            &render_options,
+            &actual,
+            &health,
+            true,
+        )
+        .expect("complete state verifies");
+
+        drop(socket_listeners);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cluster_install_refuses_non_substrate_manifest() {
+        let manifests = vec![DesiredManifest {
+            name: "some-app".to_string(),
+            path: "/tmp/app.yaml".to_string(),
+            contents: "kind: Deployment\n".to_string(),
+        }];
+
+        let error = verify_substrate_manifest_scope(&manifests).expect_err("scope guard");
+
+        assert!(error.to_string().contains("non-substrate"));
+    }
+
+    #[test]
+    fn cluster_install_verifies_complete_cluster_state() {
+        let mut config = sample_host_config();
+        let root = unique_test_dir("cluster-install-state");
+        config.cluster.token_file = root.join("k3s-token").display().to_string();
+        config.cluster.kubeconfig_out = root.join("kubeconfig").display().to_string();
+
+        fs::write(&config.cluster.token_file, "a".repeat(64)).expect("write token");
+        fs::set_permissions(
+            &config.cluster.token_file,
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("token perms");
+        fs::write(
+            &config.cluster.kubeconfig_out,
+            format!(
+                "apiVersion: v1\nclusters:\n- cluster:\n    server: {}\n",
+                config.cluster.api_server.endpoint
+            ),
+        )
+        .expect("write kubeconfig");
+        fs::set_permissions(
+            &config.cluster.kubeconfig_out,
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("kubeconfig perms");
+
+        let manifests = vec![
+            DesiredManifest {
+                name: "metrics-server".to_string(),
+                path: root.join("metrics-server.yaml").display().to_string(),
+                contents: "kind: Deployment\n".to_string(),
+            },
+            DesiredManifest {
+                name: "nas-csi".to_string(),
+                path: root.join("nas-csi.yaml").display().to_string(),
+                contents: "kind: CSIDriver\n".to_string(),
+            },
+        ];
+        let options = cluster_options_from_config(&config, &root.join("rendered"), "kubectl");
+        let mut nodes = BTreeMap::new();
+        for node in &config.nodes {
+            nodes.insert(
+                node.name.clone(),
+                ClusterNodeActualState {
+                    domain_running: true,
+                    k3s_ready: true,
+                    kubernetes_ready: true,
+                    labels: node.k3s.labels.clone(),
+                    taints: node.k3s.taints.clone(),
+                },
+            );
+        }
+        let actual = ClusterActualState {
+            token_present: true,
+            kubeconfig_present: true,
+            api_ready: true,
+            nodes,
+            applied_manifests: manifests
+                .iter()
+                .map(|manifest| (manifest.name.clone(), manifest.desired_hash()))
+                .collect(),
+        };
+
+        verify_cluster_install_state(&config, &actual, &manifests, &options)
+            .expect("cluster state verifies");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cluster_install_rejects_remaining_apply_steps() {
+        let plan = ClusterReconcilePlan {
+            steps: vec![nas_csi_cluster_manager::ClusterReconcileStep {
+                description: "wait for api".to_string(),
+                kind: ClusterReconcileStepKind::Apply(ClusterOperation::WaitForClusterApi {
+                    command: ClusterCommandSpec::new("kubectl", ["get".to_string()]),
+                }),
+            }],
+        };
+
+        let error = verify_cluster_install_idempotence(&plan).expect_err("not idempotent");
+
+        assert!(error.to_string().contains("not idempotent"));
+    }
+
+    #[test]
+    fn csi_manifest_guard_requires_lab_images() {
+        let manifest = format!("image: {LAB_CONTROLLER_IMAGE}\n---\nimage: {LAB_NODE_IMAGE}\n");
+        verify_nas_csi_manifest_uses_lab_images(&manifest).expect("lab images");
+
+        let error = verify_nas_csi_manifest_uses_lab_images("image: nas-csi-controller:latest\n")
+            .expect_err("missing lab image");
+
+        assert!(error.to_string().contains(LAB_CONTROLLER_IMAGE));
+    }
+
+    #[test]
+    fn renders_static_existing_dataset_pvs_for_rw_and_ro_exports() {
+        let config = sample_host_config();
+
+        let manifest = render_static_existing_dataset_manifest(&config, "default");
+
+        assert!(manifest.contains("name: nas-csi-repos"));
+        assert!(manifest.contains("volumeHandle: \"repos\""));
+        assert!(manifest.contains("nas-csi.dev/dataset: \"tank/repos\""));
+        assert!(manifest.contains("nas-csi.dev/sourcePath: \"/mnt/tank/repos\""));
+        assert!(manifest.contains("nas-csi.dev/readOnly: \"false\""));
+        assert!(manifest.contains("key: kubernetes.io/hostname"));
+        assert!(manifest.contains("- \"server-1\""));
+        assert!(manifest.contains("- \"agent-1\""));
+        assert!(manifest.contains("name: nas-csi-samples"));
+        assert!(manifest.contains("volumeHandle: \"samples\""));
+        assert!(manifest.contains("nas-csi.dev/dataset: \"tank/samples\""));
+        assert!(manifest.contains("ReadOnlyMany"));
+        assert!(manifest.contains("nas-csi.dev/readOnly: \"true\""));
+    }
+
+    #[test]
+    fn renders_smoke_pods_pinned_to_nodes_with_export() {
+        let config = sample_host_config();
+        let options = sample_csi_install_options();
+
+        let manifest = render_csi_smoke_pod_manifest(&config, &options);
+
+        assert!(manifest.contains("name: nas-csi-smoke-repos"));
+        assert!(manifest.contains("nodeName: \"server-1\""));
+        assert!(manifest.contains("claimName: nas-csi-repos"));
+        assert!(manifest.contains("mountPath: /mnt/nas-csi/repos"));
+        assert!(manifest.contains("claimName: nas-csi-samples"));
+        assert!(manifest.contains("mountPath: /mnt/nas-csi/samples"));
+        assert!(manifest.contains("readOnly: true"));
+    }
+
+    #[test]
+    fn renders_missing_export_probe_against_unconfigured_handle() {
+        let config = sample_host_config();
+        let options = sample_csi_install_options();
+
+        let manifest = render_missing_export_manifest(&config, &options);
+
+        assert!(manifest.contains("name: nas-csi-nas-csi-missing-export"));
+        assert!(manifest.contains("volumeHandle: nas-csi-missing-export"));
+        assert!(manifest.contains("nodeName: \"server-1\""));
+        assert!(manifest.contains("claimName: nas-csi-nas-csi-missing-export"));
+    }
+
+    #[test]
+    fn workload_validation_selects_read_write_repo_and_read_only_content_exports() {
+        let config = sample_host_config();
+        let options = sample_workload_validation_options();
+
+        let selection =
+            select_workload_validation_exports(&config, &options).expect("select exports");
+
+        assert_eq!(
+            selection,
+            WorkloadValidationSelection {
+                repo_export: "repos".to_string(),
+                content_export: "samples".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn renders_workload_validation_pods_for_selected_static_pvcs() {
+        let config = sample_host_config();
+        let options = sample_workload_validation_options();
+        let selection =
+            select_workload_validation_exports(&config, &options).expect("select exports");
+
+        let manifest =
+            render_workload_validation_manifest(&config, &options, &selection).expect("manifest");
+
+        assert!(manifest.contains("name: nas-csi-workload-repo-repos"));
+        assert!(manifest.contains("name: nas-csi-workload-content-samples"));
+        assert!(manifest.contains("claimName: nas-csi-repos"));
+        assert!(manifest.contains("claimName: nas-csi-samples"));
+        assert!(manifest.contains("mountPath: /work/repo"));
+        assert!(manifest.contains("mountPath: /content"));
+        assert!(manifest.contains("readOnly: true"));
+        assert!(manifest.contains("httpd -f -p 8080 -h /content"));
+    }
+
+    #[test]
+    fn workload_scripts_cover_repo_and_streaming_operations() {
+        let repo_script = repository_workload_script();
+        let content_script = content_streaming_workload_script();
+
+        assert!(repo_script.contains("git -C \"$repo\" status --short"));
+        assert!(repo_script.contains("npm install --ignore-scripts --no-audit --no-fund"));
+        assert!(repo_script.contains("smallFilesWritten"));
+        assert!(content_script.contains("dd if=\"$first_file\" of=/dev/null"));
+        assert!(content_script.contains("wget -qO- http://127.0.0.1:8080/"));
+    }
+
+    #[test]
+    fn extracts_virtiofs_cache_policy_from_domain_xml() {
+        let xml = r#"
+<domain>
+  <devices>
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs' cache='always'/>
+      <source socket='/run/nas-csi/repos.sock'/>
+      <target dir='nascsi_repos'/>
+    </filesystem>
+    <filesystem type='mount' accessmode='passthrough'>
+      <driver type='virtiofs'/>
+      <target dir="nascsi_samples"/>
+    </filesystem>
+  </devices>
+</domain>
+"#;
+
+        assert_eq!(extract_virtiofs_cache_policy(xml, "nascsi_repos"), "always");
+        assert_eq!(
+            extract_virtiofs_cache_policy(xml, "nascsi_samples"),
+            "not-set"
+        );
+        assert_eq!(
+            extract_virtiofs_cache_policy(xml, "nascsi_missing"),
+            "not-found"
+        );
+    }
+
+    #[test]
+    fn csi_install_input_guard_rejects_unassigned_exports() {
+        let mut config = sample_host_config();
+        for node in &mut config.nodes {
+            node.exports.retain(|export| export != "samples");
+        }
+        let options = sample_csi_install_options();
+
+        let error = verify_csi_install_inputs(&config, &options).expect_err("unassigned export");
+
+        assert!(error.to_string().contains("samples"));
+    }
+
+    #[test]
+    fn safe_k8s_name_stays_in_dns_label_limit() {
+        let name = safe_k8s_name("nas-csi", &"repo_".repeat(40));
+
+        assert!(name.len() <= 63);
+        assert!(name.starts_with("nas-csi-"));
+        assert!(
+            name.chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        );
+    }
+
+    #[test]
+    fn parse_listing_output_ignores_empty_lines() {
+        assert_eq!(
+            parse_listing_output("alpha\n\nbeta\n"),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+    }
+
+    #[test]
+    fn command_log_args_redact_guest_agent_payloads_and_sensitive_flags() {
+        let command = nas_csi_vm_manager::CommandSpec::new(
+            "/usr/bin/virsh",
+            [
+                "-c".to_string(),
+                "qemu:///system".to_string(),
+                "qemu-agent-command".to_string(),
+                "nascsi-node-1".to_string(),
+                r#"{"execute":"guest-exec","arguments":{"arg":["secret-file-contents"]}}"#
+                    .to_string(),
+            ],
+        );
+
+        assert_eq!(
+            sanitized_command_args(&command),
+            vec![
+                "-c",
+                "qemu:///system",
+                "qemu-agent-command",
+                "nascsi-node-1",
+                "[REDACTED_QEMU_AGENT_PAYLOAD]"
+            ]
+        );
+
+        let command = nas_csi_vm_manager::CommandSpec::new(
+            "kubectl",
+            [
+                "--kubeconfig".to_string(),
+                "/etc/nas-csi/kubeconfig".to_string(),
+                "--token=super-secret".to_string(),
+                "get".to_string(),
+                "nodes".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            sanitized_command_args(&command),
+            vec![
+                "--kubeconfig",
+                "[REDACTED]",
+                "--token=[REDACTED]",
+                "get",
+                "nodes"
+            ]
+        );
+    }
+
+    fn sample_host_config() -> HostConfig {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/configs/host.sample.yaml");
+        load_yaml(&path).expect("load sample host config")
+    }
+
+    fn sample_csi_install_options() -> CsiInstallOptions {
+        CsiInstallOptions {
+            artifact_dir: PathBuf::from("/var/lib/nas-csi/rendered"),
+            manifest_root: PathBuf::from("/usr/local/share/nas-csi/deploy"),
+            kubectl: "kubectl".to_string(),
+            namespace: "default".to_string(),
+            smoke_image: "busybox:1.36".to_string(),
+            wait_timeout: Duration::from_secs(600),
+            execute: false,
+        }
+    }
+
+    fn sample_workload_validation_options() -> WorkloadValidationOptions {
+        WorkloadValidationOptions {
+            artifact_dir: PathBuf::from("/var/lib/nas-csi/rendered"),
+            kubectl: "kubectl".to_string(),
+            namespace: "default".to_string(),
+            repo_export: None,
+            content_export: None,
+            repo_image: "node:22-bookworm".to_string(),
+            content_image: "busybox:1.36".to_string(),
+            content_command: "httpd -f -p 8080 -h /content".to_string(),
+            wait_timeout: Duration::from_secs(600),
+            small_file_count: 200,
+            keep_pods: false,
+            execute: false,
+        }
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

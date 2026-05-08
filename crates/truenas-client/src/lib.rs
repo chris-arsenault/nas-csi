@@ -3,6 +3,10 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::fmt;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{Message, WebSocket};
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct JsonRpcRequest {
@@ -99,6 +103,236 @@ pub trait RpcTransport {
     type Error: std::error::Error + Send + Sync + 'static;
 
     fn send(&mut self, message: &str) -> Result<String, Self::Error>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrueNasWebSocketConfig {
+    pub url: String,
+    pub api_key: String,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub max_retries: u8,
+    pub accept_invalid_certs: bool,
+}
+
+impl TrueNasWebSocketConfig {
+    pub fn new(url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            api_key: api_key.into(),
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
+            max_retries: 2,
+            accept_invalid_certs: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TrueNasWebSocketError {
+    Url(String),
+    Connect(String),
+    Tls(String),
+    WebSocket(String),
+    AuthRejected,
+    UnexpectedMessage(String),
+    JsonRpc(JsonRpcError),
+}
+
+impl fmt::Display for TrueNasWebSocketError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Url(message) => write!(f, "invalid TrueNAS websocket URL: {message}"),
+            Self::Connect(message) => write!(f, "TrueNAS websocket connect failed: {message}"),
+            Self::Tls(message) => write!(f, "TrueNAS websocket TLS setup failed: {message}"),
+            Self::WebSocket(message) => write!(f, "TrueNAS websocket error: {message}"),
+            Self::AuthRejected => f.write_str("TrueNAS API key authentication was rejected"),
+            Self::UnexpectedMessage(message) => {
+                write!(f, "unexpected TrueNAS websocket message: {message}")
+            }
+            Self::JsonRpc(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for TrueNasWebSocketError {}
+
+impl From<JsonRpcError> for TrueNasWebSocketError {
+    fn from(value: JsonRpcError) -> Self {
+        Self::JsonRpc(value)
+    }
+}
+
+pub struct TrueNasWebSocketTransport {
+    config: TrueNasWebSocketConfig,
+    socket: Option<WebSocket<MaybeTlsStream<TcpStream>>>,
+}
+
+impl TrueNasWebSocketTransport {
+    pub fn new(config: TrueNasWebSocketConfig) -> Self {
+        Self {
+            config,
+            socket: None,
+        }
+    }
+
+    fn ensure_connected(&mut self) -> Result<(), TrueNasWebSocketError> {
+        if self.socket.is_some() {
+            return Ok(());
+        }
+
+        let mut socket = connect_websocket(&self.config)?;
+        authenticate_socket(&mut socket, &self.config.api_key)?;
+        self.socket = Some(socket);
+        Ok(())
+    }
+
+    fn drop_socket(&mut self) {
+        self.socket = None;
+    }
+}
+
+impl RpcTransport for TrueNasWebSocketTransport {
+    type Error = TrueNasWebSocketError;
+
+    fn send(&mut self, message: &str) -> Result<String, Self::Error> {
+        let mut last_error: Option<TrueNasWebSocketError> = None;
+        for _attempt in 0..=self.config.max_retries {
+            match self.ensure_connected() {
+                Ok(()) => {}
+                Err(error) => {
+                    last_error = Some(error);
+                    self.drop_socket();
+                    continue;
+                }
+            }
+
+            let Some(socket) = self.socket.as_mut() else {
+                continue;
+            };
+            match socket.send(Message::Text(message.to_string().into())) {
+                Ok(()) => return read_text_message(socket),
+                Err(error) => {
+                    last_error = Some(TrueNasWebSocketError::WebSocket(error.to_string()));
+                    self.drop_socket();
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            TrueNasWebSocketError::Connect("exhausted retry attempts".to_string())
+        }))
+    }
+}
+
+fn connect_websocket(
+    config: &TrueNasWebSocketConfig,
+) -> Result<WebSocket<MaybeTlsStream<TcpStream>>, TrueNasWebSocketError> {
+    let url = url::Url::parse(&config.url)
+        .map_err(|error| TrueNasWebSocketError::Url(format!("{} ({})", config.url, error)))?;
+    let scheme = url.scheme();
+    if scheme != "ws" && scheme != "wss" {
+        return Err(TrueNasWebSocketError::Url(format!(
+            "unsupported scheme {scheme}"
+        )));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| TrueNasWebSocketError::Url("missing host".to_string()))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| TrueNasWebSocketError::Url("missing port".to_string()))?;
+    let mut last_error = None;
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| TrueNasWebSocketError::Connect(error.to_string()))?;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, config.connect_timeout) {
+            Ok(stream) => {
+                stream
+                    .set_read_timeout(Some(config.request_timeout))
+                    .map_err(|error| TrueNasWebSocketError::Connect(error.to_string()))?;
+                stream
+                    .set_write_timeout(Some(config.request_timeout))
+                    .map_err(|error| TrueNasWebSocketError::Connect(error.to_string()))?;
+                stream
+                    .set_nodelay(true)
+                    .map_err(|error| TrueNasWebSocketError::Connect(error.to_string()))?;
+                let connector = tls_connector(config)?;
+                let (socket, _response) = tungstenite::client_tls_with_config(
+                    config.url.as_str(),
+                    stream,
+                    None,
+                    Some(connector),
+                )
+                .map_err(|error| TrueNasWebSocketError::WebSocket(error.to_string()))?;
+                return Ok(socket);
+            }
+            Err(error) => last_error = Some(error.to_string()),
+        }
+    }
+
+    Err(TrueNasWebSocketError::Connect(last_error.unwrap_or_else(
+        || "no socket addresses resolved".to_string(),
+    )))
+}
+
+fn tls_connector(
+    config: &TrueNasWebSocketConfig,
+) -> Result<tungstenite::Connector, TrueNasWebSocketError> {
+    if config.url.starts_with("ws://") {
+        return Ok(tungstenite::Connector::Plain);
+    }
+    let connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(config.accept_invalid_certs)
+        .build()
+        .map_err(|error| TrueNasWebSocketError::Tls(error.to_string()))?;
+    Ok(tungstenite::Connector::NativeTls(connector))
+}
+
+fn authenticate_socket(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+    api_key: &str,
+) -> Result<(), TrueNasWebSocketError> {
+    let request = JsonRpcRequest::new(0, "auth.login_with_api_key", Some(json!([api_key])));
+    let text = serialize_request(&request)?;
+    socket
+        .send(Message::Text(text.into()))
+        .map_err(|error| TrueNasWebSocketError::WebSocket(error.to_string()))?;
+    let response = read_text_message(socket)?;
+    let authenticated: bool = parse_response(&response, 0)?;
+    if authenticated {
+        Ok(())
+    } else {
+        Err(TrueNasWebSocketError::AuthRejected)
+    }
+}
+
+fn read_text_message(
+    socket: &mut WebSocket<MaybeTlsStream<TcpStream>>,
+) -> Result<String, TrueNasWebSocketError> {
+    loop {
+        match socket
+            .read()
+            .map_err(|error| TrueNasWebSocketError::WebSocket(error.to_string()))?
+        {
+            Message::Text(text) => return Ok(text.to_string()),
+            Message::Binary(bytes) => {
+                return String::from_utf8(bytes.to_vec())
+                    .map_err(|error| TrueNasWebSocketError::UnexpectedMessage(error.to_string()));
+            }
+            Message::Ping(payload) => socket
+                .send(Message::Pong(payload))
+                .map_err(|error| TrueNasWebSocketError::WebSocket(error.to_string()))?,
+            Message::Pong(_) => {}
+            Message::Close(frame) => {
+                return Err(TrueNasWebSocketError::UnexpectedMessage(format!(
+                    "close frame {frame:?}"
+                )));
+            }
+            Message::Frame(_) => {}
+        }
+    }
 }
 
 pub struct JsonRpcClient<T> {
@@ -464,6 +698,28 @@ mod tests {
         let mut client = JsonRpcClient::new(transport);
 
         assert!(client.login_with_api_key("secret-key").expect("login"));
+    }
+
+    #[test]
+    fn websocket_config_defaults_are_bounded() {
+        let config = TrueNasWebSocketConfig::new("wss://truenas.example/api/current", "secret");
+
+        assert_eq!(config.connect_timeout, std::time::Duration::from_secs(10));
+        assert_eq!(config.request_timeout, std::time::Duration::from_secs(30));
+        assert_eq!(config.max_retries, 2);
+        assert!(!config.accept_invalid_certs);
+    }
+
+    #[test]
+    fn websocket_transport_rejects_unsupported_scheme_without_network() {
+        let mut transport = TrueNasWebSocketTransport::new(TrueNasWebSocketConfig::new(
+            "http://truenas.example/api/current",
+            "secret",
+        ));
+
+        let error = transport.send("{}").expect_err("unsupported scheme");
+
+        assert!(error.to_string().contains("unsupported scheme"));
     }
 
     #[test]

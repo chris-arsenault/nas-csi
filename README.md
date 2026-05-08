@@ -103,6 +103,7 @@ cargo run -p nas-csi-xtask -- package-host-agent
 - [Documentation index](docs/README.md)
 - [Design overview](docs/design/README.md)
 - [Architecture](docs/design/architecture.md)
+- [Deployment scope](docs/design/scope.md)
 - [VM management](docs/design/vm-management.md)
 - [Cluster management](docs/design/cluster-management.md)
 - [Configuration](docs/design/configuration.md)
@@ -111,6 +112,9 @@ cargo run -p nas-csi-xtask -- package-host-agent
 - [Project plan](docs/project/README.md)
 - [Implementation plan](docs/project/implementation-plan.md)
 - [Operational runbooks](docs/operations/README.md)
+- [First deploy](docs/operations/runbooks/first-deploy.md)
+- [Rollback](docs/operations/runbooks/rollback.md)
+- [Observability](docs/operations/observability.md)
 - [Research notes](docs/research/README.md)
 - [Examples](examples/README.md)
 

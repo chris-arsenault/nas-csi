@@ -457,6 +457,46 @@ where
     }
 }
 
+fn log_node_operation_start(operation: &str, fields: Vec<(&'static str, serde_json::Value)>) {
+    log_node_operation(operation, "start", fields, None);
+}
+
+fn log_node_operation_success(operation: &str, fields: Vec<(&'static str, serde_json::Value)>) {
+    log_node_operation(operation, "success", fields, None);
+}
+
+fn log_node_operation_failure(
+    operation: &str,
+    fields: Vec<(&'static str, serde_json::Value)>,
+    status: &Status,
+) {
+    log_node_operation(operation, "failure", fields, Some(status));
+}
+
+fn log_node_operation(
+    operation: &str,
+    result: &str,
+    fields: Vec<(&'static str, serde_json::Value)>,
+    status: Option<&Status>,
+) {
+    let mut log = serde_json::Map::new();
+    log.insert("event".to_string(), "csi_node_operation".into());
+    log.insert("component".to_string(), "nas-csi-node".into());
+    log.insert("operation".to_string(), operation.into());
+    log.insert("result".to_string(), result.into());
+    for (key, value) in fields {
+        log.insert(key.to_string(), value);
+    }
+    if let Some(status) = status {
+        log.insert(
+            "statusCode".to_string(),
+            format!("{:?}", status.code()).into(),
+        );
+        log.insert("error".to_string(), status.message().into());
+    }
+    eprintln!("{}", serde_json::Value::Object(log));
+}
+
 #[tonic::async_trait]
 impl<M> csi::identity_server::Identity for NasCsiNodeService<M>
 where
@@ -503,31 +543,58 @@ where
         request: Request<csi::NodeStageVolumeRequest>,
     ) -> Result<Response<csi::NodeStageVolumeResponse>, Status> {
         let request = request.into_inner();
-        let mounts = self.current_mounts()?;
-        match plan_node_stage(
-            &NodeStageRequestPlan {
-                volume_id: request.volume_id,
-                staging_path: request.staging_target_path,
-                read_only: request.readonly,
-            },
-            &self.runtime,
-            &mounts,
-        ) {
-            NodeStageAction::AlreadyStaged => Ok(Response::new(csi::NodeStageVolumeResponse {})),
-            NodeStageAction::BindMount {
-                source,
-                target,
-                read_only,
-            } => {
-                self.mounter
-                    .ensure_dir(&target)
-                    .map_err(|error| Status::internal(error.to_string()))?;
-                self.mounter
-                    .bind_mount(&source, &target, read_only)
-                    .map_err(|error| Status::internal(error.to_string()))?;
+        let volume_id = request.volume_id;
+        let staging_path = request.staging_target_path;
+        let requested_read_only = request.readonly;
+        let identifiers = || {
+            vec![
+                ("volumeId", volume_id.clone().into()),
+                ("exportId", volume_id.clone().into()),
+                ("stagingPath", staging_path.clone().into()),
+                ("targetPath", staging_path.clone().into()),
+                ("readOnly", requested_read_only.into()),
+            ]
+        };
+        log_node_operation_start("node_stage_volume", identifiers());
+        let result = (|| -> Result<&'static str, Status> {
+            let mounts = self.current_mounts()?;
+            match plan_node_stage(
+                &NodeStageRequestPlan {
+                    volume_id: volume_id.clone(),
+                    staging_path: staging_path.clone(),
+                    read_only: requested_read_only,
+                },
+                &self.runtime,
+                &mounts,
+            ) {
+                NodeStageAction::AlreadyStaged => Ok("already_staged"),
+                NodeStageAction::BindMount {
+                    source,
+                    target,
+                    read_only,
+                } => {
+                    self.mounter
+                        .ensure_dir(&target)
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    self.mounter
+                        .bind_mount(&source, &target, read_only)
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    Ok("bind_mount")
+                }
+                NodeStageAction::Error(error) => Err(Status::failed_precondition(error)),
+            }
+        })();
+        match result {
+            Ok(action) => {
+                let mut fields = identifiers();
+                fields.push(("action", action.into()));
+                log_node_operation_success("node_stage_volume", fields);
                 Ok(Response::new(csi::NodeStageVolumeResponse {}))
             }
-            NodeStageAction::Error(error) => Err(Status::failed_precondition(error)),
+            Err(status) => {
+                log_node_operation_failure("node_stage_volume", identifiers(), &status);
+                Err(status)
+            }
         }
     }
 
@@ -536,21 +603,45 @@ where
         request: Request<csi::NodeUnstageVolumeRequest>,
     ) -> Result<Response<csi::NodeUnstageVolumeResponse>, Status> {
         let request = request.into_inner();
-        let mounts = self.current_mounts()?;
-        match plan_node_unstage(
-            &NodeUnstageRequestPlan {
-                staging_path: request.staging_target_path,
-            },
-            &mounts,
-        ) {
-            NodeUnstageAction::AlreadyUnstaged => {
+        let volume_id = request.volume_id;
+        let staging_path = request.staging_target_path;
+        let identifiers = || {
+            vec![
+                ("volumeId", volume_id.clone().into()),
+                ("exportId", volume_id.clone().into()),
+                ("stagingPath", staging_path.clone().into()),
+                ("targetPath", staging_path.clone().into()),
+                ("readOnly", serde_json::Value::Null),
+            ]
+        };
+        log_node_operation_start("node_unstage_volume", identifiers());
+        let result = (|| -> Result<&'static str, Status> {
+            let mounts = self.current_mounts()?;
+            match plan_node_unstage(
+                &NodeUnstageRequestPlan {
+                    staging_path: staging_path.clone(),
+                },
+                &mounts,
+            ) {
+                NodeUnstageAction::AlreadyUnstaged => Ok("already_unstaged"),
+                NodeUnstageAction::Unmount { target } => {
+                    self.mounter
+                        .unmount(&target)
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    Ok("unmount")
+                }
+            }
+        })();
+        match result {
+            Ok(action) => {
+                let mut fields = identifiers();
+                fields.push(("action", action.into()));
+                log_node_operation_success("node_unstage_volume", fields);
                 Ok(Response::new(csi::NodeUnstageVolumeResponse {}))
             }
-            NodeUnstageAction::Unmount { target } => {
-                self.mounter
-                    .unmount(&target)
-                    .map_err(|error| Status::internal(error.to_string()))?;
-                Ok(Response::new(csi::NodeUnstageVolumeResponse {}))
+            Err(status) => {
+                log_node_operation_failure("node_unstage_volume", identifiers(), &status);
+                Err(status)
             }
         }
     }
@@ -560,33 +651,59 @@ where
         request: Request<csi::NodePublishVolumeRequest>,
     ) -> Result<Response<csi::NodePublishVolumeResponse>, Status> {
         let request = request.into_inner();
-        let mounts = self.current_mounts()?;
-        match plan_node_publish(
-            &NodePublishRequestPlan {
-                volume_id: request.volume_id,
-                staging_path: request.staging_target_path,
-                target_path: request.target_path,
-                read_only: request.readonly,
-            },
-            &mounts,
-        ) {
-            NodePublishAction::AlreadyPublished => {
+        let volume_id = request.volume_id;
+        let staging_path = request.staging_target_path;
+        let target_path = request.target_path;
+        let requested_read_only = request.readonly;
+        let identifiers = || {
+            vec![
+                ("volumeId", volume_id.clone().into()),
+                ("exportId", volume_id.clone().into()),
+                ("stagingPath", staging_path.clone().into()),
+                ("targetPath", target_path.clone().into()),
+                ("readOnly", requested_read_only.into()),
+            ]
+        };
+        log_node_operation_start("node_publish_volume", identifiers());
+        let result = (|| -> Result<&'static str, Status> {
+            let mounts = self.current_mounts()?;
+            match plan_node_publish(
+                &NodePublishRequestPlan {
+                    volume_id: volume_id.clone(),
+                    staging_path: staging_path.clone(),
+                    target_path: target_path.clone(),
+                    read_only: requested_read_only,
+                },
+                &mounts,
+            ) {
+                NodePublishAction::AlreadyPublished => Ok("already_published"),
+                NodePublishAction::BindMount {
+                    source,
+                    target,
+                    read_only,
+                } => {
+                    self.mounter
+                        .ensure_dir(&target)
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    self.mounter
+                        .bind_mount(&source, &target, read_only)
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    Ok("bind_mount")
+                }
+                NodePublishAction::Error(error) => Err(Status::failed_precondition(error)),
+            }
+        })();
+        match result {
+            Ok(action) => {
+                let mut fields = identifiers();
+                fields.push(("action", action.into()));
+                log_node_operation_success("node_publish_volume", fields);
                 Ok(Response::new(csi::NodePublishVolumeResponse {}))
             }
-            NodePublishAction::BindMount {
-                source,
-                target,
-                read_only,
-            } => {
-                self.mounter
-                    .ensure_dir(&target)
-                    .map_err(|error| Status::internal(error.to_string()))?;
-                self.mounter
-                    .bind_mount(&source, &target, read_only)
-                    .map_err(|error| Status::internal(error.to_string()))?;
-                Ok(Response::new(csi::NodePublishVolumeResponse {}))
+            Err(status) => {
+                log_node_operation_failure("node_publish_volume", identifiers(), &status);
+                Err(status)
             }
-            NodePublishAction::Error(error) => Err(Status::failed_precondition(error)),
         }
     }
 
@@ -595,21 +712,44 @@ where
         request: Request<csi::NodeUnpublishVolumeRequest>,
     ) -> Result<Response<csi::NodeUnpublishVolumeResponse>, Status> {
         let request = request.into_inner();
-        let mounts = self.current_mounts()?;
-        match plan_node_unpublish(
-            &NodeUnpublishRequestPlan {
-                target_path: request.target_path,
-            },
-            &mounts,
-        ) {
-            NodeUnpublishAction::AlreadyUnpublished => {
+        let volume_id = request.volume_id;
+        let target_path = request.target_path;
+        let identifiers = || {
+            vec![
+                ("volumeId", volume_id.clone().into()),
+                ("exportId", volume_id.clone().into()),
+                ("targetPath", target_path.clone().into()),
+                ("readOnly", serde_json::Value::Null),
+            ]
+        };
+        log_node_operation_start("node_unpublish_volume", identifiers());
+        let result = (|| -> Result<&'static str, Status> {
+            let mounts = self.current_mounts()?;
+            match plan_node_unpublish(
+                &NodeUnpublishRequestPlan {
+                    target_path: target_path.clone(),
+                },
+                &mounts,
+            ) {
+                NodeUnpublishAction::AlreadyUnpublished => Ok("already_unpublished"),
+                NodeUnpublishAction::Unmount { target } => {
+                    self.mounter
+                        .unmount(&target)
+                        .map_err(|error| Status::internal(error.to_string()))?;
+                    Ok("unmount")
+                }
+            }
+        })();
+        match result {
+            Ok(action) => {
+                let mut fields = identifiers();
+                fields.push(("action", action.into()));
+                log_node_operation_success("node_unpublish_volume", fields);
                 Ok(Response::new(csi::NodeUnpublishVolumeResponse {}))
             }
-            NodeUnpublishAction::Unmount { target } => {
-                self.mounter
-                    .unmount(&target)
-                    .map_err(|error| Status::internal(error.to_string()))?;
-                Ok(Response::new(csi::NodeUnpublishVolumeResponse {}))
+            Err(status) => {
+                log_node_operation_failure("node_unpublish_volume", identifiers(), &status);
+                Err(status)
             }
         }
     }

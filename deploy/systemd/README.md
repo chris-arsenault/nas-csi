@@ -25,6 +25,60 @@ cd dist/host-agent
 sudo ./install.sh
 ```
 
+The package install step only installs the binary, unit, directory layout, and
+packaged manifests. First host bring-up is performed by the installed binary:
+
+```sh
+sudo nas-csi-host-agent host-install \
+  --intent /etc/nas-csi/intent.yaml \
+  --selections /etc/nas-csi/selections.yaml
+```
+
+Add `--execute` after reviewing the dry-run output. The execute path starts the
+managed domains by default and verifies root disks, seed images, libvirt domain
+ownership, virtiofsd units, sockets, qemu guest agent response, health output,
+idempotence, and dataset observations.
+
+After rebooting TrueNAS, rerun the installer in verification-only mode:
+
+```sh
+sudo nas-csi-host-agent host-install \
+  --post-reboot-check \
+  --config /etc/nas-csi/host.yaml
+```
+
+After host bring-up succeeds, run cluster substrate bring-up:
+
+```sh
+sudo nas-csi-host-agent cluster install \
+  --config /etc/nas-csi/host.yaml
+```
+
+Add `--execute` after reviewing the cluster dry-run output. The cluster
+installer owns token generation, first-server startup, kubeconfig retrieval,
+join-node startup, API/node readiness, labels/taints, substrate manifest apply,
+and idempotence checks. To validate VM maintenance, add `--reboot-node NAME`.
+After rebooting TrueNAS, run:
+
+```sh
+sudo nas-csi-host-agent cluster install \
+  --config /etc/nas-csi/host.yaml \
+  --post-reboot-check
+```
+
+After the k3s substrate is healthy, run static existing-dataset CSI bring-up:
+
+```sh
+sudo nas-csi-host-agent csi install \
+  --config /etc/nas-csi/host.yaml
+```
+
+Add `--execute` after reviewing the dry-run output. The CSI installer writes
+VM-local node runtime config, applies the pinned `nas-csi` manifest, generates
+static PV/PVCs for configured exports, and runs smoke checks for virtiofs
+staging, pod publishing, restarts, missing exports, read-only mounts, and
+host/pod directory visibility. It does not install application workloads.
+
 The unit starts after local filesystems, networking, TrueNAS middleware, and
 libvirt service names. It runs `nas-csi-host-agent apply --execute` using paths
 from `/etc/nas-csi/host-agent.env`. It does not install application workloads.

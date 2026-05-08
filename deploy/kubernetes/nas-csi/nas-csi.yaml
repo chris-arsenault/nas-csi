@@ -10,6 +10,23 @@ metadata:
   name: nas-csi-node
   namespace: kube-system
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nas-csi-controller
+  namespace: kube-system
+data:
+  controller.yaml: |
+    apiVersion: nas-csi.dev/v1alpha1
+    kind: ControllerConfig
+    driverName: nas-csi.dev
+    metadataPath: /var/lib/nas-csi/controller/state.json
+    defaultCapacityBytes: 0
+    allowDynamicDatasetCreation: false
+    allowAuthoritativeDatasetDelete: false
+    allowSnapshotDelete: true
+    existingVolumes: []
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -159,7 +176,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: nas-csi-controller
-          image: ghcr.io/chris-arsenault/nas-csi-controller:0.1.0
+          image: ghcr.io/chris-arsenault/nas-csi-controller:0.1.0-lab1
           imagePullPolicy: IfNotPresent
           args:
             - --endpoint=/csi/csi.sock
@@ -173,13 +190,18 @@ spec:
             - name: config
               mountPath: /etc/nas-csi
               readOnly: true
+            - name: state
+              mountPath: /var/lib/nas-csi/controller
       volumes:
         - name: socket-dir
           emptyDir: {}
         - name: config
           configMap:
             name: nas-csi-controller
-            optional: true
+        - name: state
+          hostPath:
+            path: /var/lib/nas-csi/controller
+            type: DirectoryOrCreate
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -225,7 +247,7 @@ spec:
             - name: plugin-dir
               mountPath: /csi
         - name: nas-csi-node
-          image: ghcr.io/chris-arsenault/nas-csi-node:0.1.0
+          image: ghcr.io/chris-arsenault/nas-csi-node:0.1.0-lab1
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true

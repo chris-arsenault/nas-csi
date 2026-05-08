@@ -62,6 +62,8 @@ reconciled domains, seed images, and virtiofsd services.
 8. Wait for Kubernetes nodes to become Ready.
 9. Reconcile desired node labels and taints.
 10. Apply configured substrate manifests.
+11. Run `csi install` to refresh node runtime config, create static existing
+    dataset PV/PVCs, and verify CSI mount behavior.
 
 The CLI surface is:
 
@@ -76,7 +78,7 @@ development can use `--manifest-root deploy`.
 
 ## Node Bootstrap
 
-Cloud-init renders the guest-side substrate contract:
+Cloud-init renders the initial guest-side substrate contract:
 
 - hostname;
 - qemu guest agent installation;
@@ -84,6 +86,11 @@ Cloud-init renders the guest-side substrate contract:
 - k3s token file;
 - `/etc/nas-csi/node.yaml`;
 - virtiofs fstab entries under `/var/lib/nas-csi/virtiofs`.
+
+The CSI installer refreshes `/etc/nas-csi/node.yaml` through the qemu guest
+agent before applying and verifying the node DaemonSet. That keeps node runtime
+config tied to the host-local `HostConfig` even after VM rebuilds or export
+selection changes.
 
 The node plugin treats `/etc/nas-csi/node.yaml` and the guest mount table as
 authoritative. Missing exports fail closed.

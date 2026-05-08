@@ -110,9 +110,11 @@ Not allowed in repo:
 
 ## Runtime Node Contract
 
-Each VM receives `/etc/nas-csi/node.yaml` through cloud-init. That file is a
-`NodeRuntimeConfig` containing only the exports assigned to that VM, their
-virtiofs tags, and the guest mount paths under `/var/lib/nas-csi/virtiofs`.
+Each VM receives `/etc/nas-csi/node.yaml` as a `NodeRuntimeConfig` containing
+only the exports assigned to that VM, their virtiofs tags, and the guest mount
+paths under `/var/lib/nas-csi/virtiofs`. Cloud-init can seed the initial file,
+and `nas-csi-host-agent csi install --execute` refreshes it through the qemu
+guest agent before the CSI node DaemonSet is verified.
 
 The CSI node plugin treats this file as authoritative. If a requested volume is
 not present there, or the matching virtiofs mount is absent, the node operation

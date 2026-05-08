@@ -7,6 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+native-tls.workspace = true
 nas-csi-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tungstenite.workspace = true
+url.workspace = true

@@ -8,6 +8,8 @@ TrueNAS host
     -> discovery
     -> VM/runtime reconciliation
     -> k3s cluster reconciliation
+    -> static CSI existing-dataset install
+    -> real workload validation
     -> virtiofsd systemd services
     -> local package/install assets
 
@@ -48,7 +50,8 @@ operations, and pod mount operations fail differently and should stay separable.
 `nas-csi-host-agent`
 : TrueNAS-side CLI/daemon entrypoint. It wires discovery, materialization,
   rendering, host apply/status/health, cluster plan/apply/status, command
-  execution, guarded writes, and packaging assumptions.
+  execution, guarded writes, static existing-dataset CSI install, real workload
+  validation, and packaging assumptions.
 
 `nas-csi-proto`
 : Generated CSI protobuf and gRPC bindings. Generated Rust is build output and
@@ -67,8 +70,9 @@ operations, and pod mount operations fail differently and should stay separable.
 
 `nas-csi-truenas-client`
 : TrueNAS JSON-RPC request/response primitives and typed method wrappers for
-  the API surface this project uses. A production WebSocket transport and retry
-  policy can sit behind the existing transport trait.
+  the API surface this project uses. It includes a blocking WebSocket transport
+  with API-key authentication, connect/request timeouts, and bounded reconnect
+  attempts.
 
 `nas-csi-xtask`
 : Developer automation for workspace checks and host-agent packaging.
@@ -95,9 +99,7 @@ operations, and pod mount operations fail differently and should stay separable.
 The component boundaries above are implemented enough to compile and test
 locally. The remaining gaps are integration hardening:
 
-- durable controller metadata storage;
-- production TrueNAS WebSocket transport;
 - authenticated host-agent RPC for controller-to-host export reconciliation;
-- real-image container builds for the controller and node plugin;
-- TrueNAS lab validation for VM lifecycle, guest agent operations, and
-  virtiofs behavior.
+- TrueNAS lab validation for VM lifecycle, guest agent operations, virtiofs
+  behavior, the `csi install --execute` smoke checks, and
+  `workload validate --execute` report review.

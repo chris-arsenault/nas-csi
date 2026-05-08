@@ -14,7 +14,8 @@ The core requirement is that the same file tree remains:
 
 The design only targets node VMs running on the same TrueNAS/KVM host as the
 datasets. If the Kubernetes nodes move to another physical host, the correct
-transport becomes a network filesystem again.
+transport becomes a network filesystem again. See
+[Deployment Scope](scope.md) for first-deploy rules and non-goals.
 
 ## Ownership
 
@@ -55,7 +56,9 @@ The runtime data path is intentionally simple:
 4. The node VM has a libvirt virtiofs filesystem device for that export.
 5. Cloud-init configures the guest virtiofs mount under
    `/var/lib/nas-csi/virtiofs`.
-6. The CSI node plugin validates the virtiofs mount and bind-mounts it into
+6. `csi install` refreshes `/etc/nas-csi/node.yaml` in each VM from host-local
+   config and applies static PV/PVC manifests for the configured exports.
+7. The CSI node plugin validates the virtiofs mount and bind-mounts it into
    kubelet staging and pod target paths.
 
 The authoritative files never move into Kubernetes-owned block storage. VM root
@@ -70,9 +73,14 @@ The host-side control path starts from local desired state:
 3. `materialize` combines intent, discovery, and local selections into
    `HostConfig`.
 4. `render` writes artifacts for review.
-5. `apply` reconciles VM/runtime substrate.
-6. `cluster apply` reconciles k3s and Kubernetes substrate.
-7. `status` and `health` report actual host-side state.
+5. `apply` or `host-install` reconciles VM/runtime substrate.
+6. `cluster apply` or `cluster install` reconciles k3s and Kubernetes
+   substrate.
+7. `csi install` installs static existing-dataset CSI state and runs smoke
+   verification.
+8. `workload validate` runs the real repository and read-only streaming probes
+   against selected existing datasets.
+9. `status` and `health` report actual host-side state.
 
 CSI control is split by responsibility:
 
@@ -83,9 +91,20 @@ CSI control is split by responsibility:
   TrueNAS client/backend boundary;
 - VM and virtiofs transport changes stay on the TrueNAS host-agent side.
 
-The current controller implementation includes in-memory state and backend
-hooks for TrueNAS operations. A durable metadata backend and host-agent RPC
-surface are implementation hardening work, not a change to the ownership model.
+The controller loads `/etc/nas-csi/controller.yaml` at startup. Its durable
+metadata model is a local JSON state file, mounted at
+`/var/lib/nas-csi/controller/state.json` by the static manifest. That file
+preserves controller-owned volume, snapshot, and publish identity across
+controller restarts. The TrueNAS backend uses JSON-RPC over WebSocket with API
+key authentication, connect/request timeouts, and bounded reconnect attempts.
+
+Dynamic dataset creation remains disabled by default. When enabled, a PVC still
+needs an explicit dynamic mode parameter. Dataset deletion requires both
+controller configuration and a per-volume delete opt-in.
+
+Static existing datasets are the first supported deployment target. Dynamic
+dataset create/delete is a controller capability for later opt-in use, not the
+default storage path for the initial deployment.
 
 ## Reconciliation Model
 
@@ -135,8 +154,15 @@ The installable substrate manifest provides:
 - StorageClasses for existing datasets and retained dynamic datasets;
 - example PV/PVC manifests kept outside the applied substrate path.
 
-The host agent applies these manifests only as cluster substrate. It does not
-install application workloads.
+The cluster installer applies these manifests only as cluster substrate. The CSI
+installer separately generates static PV/PVC objects for configured existing
+datasets, with `Retain` reclaim policy and node affinity for the VMs that expose
+each export. Neither installer deploys application workloads.
+
+`workload validate` is the explicit exception for lab validation. It deploys
+temporary validation pods, exercises the selected repository and content
+datasets, records host/guest/pod coherency and `virtiofsd` behavior, then
+removes the pods on success. It is not an application deployment mechanism.
 
 ## Failure Model
 
@@ -159,8 +185,8 @@ The next validation work should prove behavior on the target host rather than
 expand design text:
 
 - boot host-agent-owned VMs on TrueNAS SCALE;
-- verify virtiofs performance and SMB coherency for repository workloads;
-- verify read-only streaming behavior for sample/library datasets;
+- run `workload validate --execute` for repository performance, SMB-visible
+  coherency, read-only streaming, and `virtiofsd` restart behavior;
 - exercise `cluster apply --execute` against real k3s nodes;
 - run CSI static-PV mount tests with the node plugin;
 - validate snapshots and replication while pods are reading or writing.

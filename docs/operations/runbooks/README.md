@@ -4,6 +4,9 @@ Operational procedures for the single-host `nas-csi` cluster.
 
 Runbooks:
 
+- [First deploy](first-deploy.md)
+- [Rollback](rollback.md)
+- [Workload validation](workload-validation.md)
 - [Node maintenance](node-maintenance.md)
 - [Cluster rebuild](cluster-rebuild.md)
 

@@ -12,6 +12,7 @@ fields.
 
 - [Design index](design/README.md)
 - [Architecture](design/architecture.md)
+- [Deployment scope](design/scope.md)
 - [VM management](design/vm-management.md)
 - [Cluster management](design/cluster-management.md)
 - [Configuration](design/configuration.md)
@@ -27,7 +28,11 @@ fields.
 ## Operations
 
 - [Operations index](operations/README.md)
+- [Observability](operations/observability.md)
 - [Runbooks](operations/runbooks/README.md)
+- [First deploy](operations/runbooks/first-deploy.md)
+- [Rollback](operations/runbooks/rollback.md)
+- [Workload validation](operations/runbooks/workload-validation.md)
 - [Node maintenance](operations/runbooks/node-maintenance.md)
 - [Cluster rebuild](operations/runbooks/cluster-rebuild.md)
 

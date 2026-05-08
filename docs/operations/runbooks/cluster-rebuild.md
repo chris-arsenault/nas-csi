@@ -31,16 +31,21 @@ The rebuild may replace:
 
 1. Export current host-agent status.
 2. Confirm desired config parses.
-3. Confirm TrueNAS datasets exist.
+3. Confirm TrueNAS datasets, SMB shares, snapshots, replication, quotas, and
+   retention tasks still exist in TrueNAS.
 4. Stop Kubernetes workloads through the user's normal deployment tool if needed.
 5. Remove or replace disposable node VM state using an explicit operator
    procedure.
-6. Run host `apply --execute` to recreate VM/runtime substrate from desired
-   state.
-7. Run `cluster apply --execute` to bootstrap k3s and reinstall substrate
+6. Run `host-install --post-reboot-check` if the host substrate should already
+   be present, or `host-install --execute` to recreate VM/runtime substrate from
+   local desired state.
+7. Run `cluster install --execute` to bootstrap k3s and reinstall substrate
    manifests.
-8. Verify CSI can mount selected read-write and read-only datasets.
-9. Return application deployment to the user/GitOps system.
+8. Run `csi install --execute` to recreate static existing-dataset PV/PVCs and
+   smoke test mounts.
+9. Run `workload validate --execute` for repository/content datasets when the
+   storage path is expected to be production-ready.
+10. Return application deployment to the user/GitOps system.
 
 The current implementation does not provide a single `destroy-cluster` command.
 Keep the destructive steps explicit until that workflow has dedicated guards.
