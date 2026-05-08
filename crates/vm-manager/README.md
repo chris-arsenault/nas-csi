@@ -48,9 +48,11 @@ Apply planning is typed rather than shell-based. The executor surface plans:
 Seed images are small VFAT volumes labeled `CIDATA` with `user-data` and
 `meta-data` files at the root.
 
-Reconcile planning consumes actual host state and converts desired operations
-into `apply`, `skip`, or `refuse` decisions. It skips matching files and seed
-images by content hash, validates existing root disk overlays with `qemu-img
-info`, reloads or restarts systemd units only when their installed contents
-change, and refuses to redefine a running libvirt domain when the managed domain
-hash differs.
+Reconcile planning consumes actual host state and converts desired state into
+named operations such as `CreateRootDisk`, `RewriteSeedImage`,
+`InstallOrUpdateSystemdUnit`, `RestartVirtiofsdService`, `DefineDomain`, and
+`RedefineDomainRequiresShutdown`. It skips matching files and seed images by
+content hash, validates existing root disk overlays with `qemu-img info`,
+refuses unknown or mismatched root disks instead of replacing them, reloads or
+restarts systemd units only when their installed contents change, and refuses to
+redefine a running libvirt domain unless explicitly allowed.

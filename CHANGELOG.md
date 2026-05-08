@@ -17,6 +17,9 @@ process are still early.
 - Internal Rust VFAT writer for cloud-init NoCloud seed images.
 - State-aware host reconciliation planner with `apply`, `skip`, and `refuse`
   decisions.
+- Named reconcile operations for root disks, seed images, systemd units,
+  virtiofsd restarts, and libvirt domain definition changes.
+- Host-agent command runner abstraction with fake-runner test coverage.
 - Discovered host tool paths in generated `HostConfig.hostTools`.
 - Initial documentation set covering architecture, VM ownership, k3s lifecycle,
   discovery, configuration, research, and operational runbooks.

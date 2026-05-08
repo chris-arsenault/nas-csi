@@ -61,6 +61,12 @@ overlays, cloud-init seed images, virtiofsd systemd units, and libvirt domain
 definitions. The only mutating path is `apply --execute`; execution refuses to
 run if any step is unsafe or blocked by missing host state.
 
+Execution is routed through a command runner abstraction that accepts only
+`program + argv` command specs. `--execute` refuses all changes if any reconcile
+step refused, never replaces an existing root disk, and refuses running-domain
+XML changes unless `--allow-running-domain-redefine` is passed. VM start remains
+out of the default apply path.
+
 Generated `HostConfig` carries discovered host tool paths under `hostTools`.
 Those paths feed render and apply, so systemd units use the discovered
 `virtiofsd` binary and host commands use the discovered `qemu-img`, `virsh`, and

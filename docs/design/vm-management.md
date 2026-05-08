@@ -219,6 +219,14 @@ libvirt domains through a `nas-csi` metadata hash instead of raw `virsh dumpxml`
 bytes. Raw libvirt XML is not stable enough for equality because libvirt expands
 definitions after `virsh define`.
 
+The reconcile diff is intentionally typed. It uses named operations such as
+`CreateRootDisk`, `RewriteSeedImage`, `InstallOrUpdateSystemdUnit`,
+`RestartVirtiofsdService`, `DefineDomain`, and
+`RedefineDomainRequiresShutdown`, instead of carrying opaque shell strings.
+Host execution routes commands through `program + argv` specs. Existing root
+disks are never replaced by apply; an unknown or mismatched existing image is a
+refusal.
+
 VM start is still excluded from the default CLI path, but the planner has a
 state-aware `start_domains` option for the future execute policy. If enabled, it
 skips domains that are already running and starts only stopped or missing ones
