@@ -3,6 +3,11 @@
 This directory contains the long-form design, project planning, operations, and
 research notes for `nas-csi`.
 
+Docs explain ownership, safety boundaries, and operational intent. They should
+not duplicate Rust structs, generated protobuf output, or Kubernetes manifest
+contents; the code and deploy files are the source of truth for exact APIs and
+fields.
+
 ## Design
 
 - [Design index](design/README.md)

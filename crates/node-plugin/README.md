@@ -17,6 +17,6 @@ Responsibilities:
 Important rules:
 
 - Never create a fake source directory if the virtiofs tag is absent.
-- Verify mount type with `findmnt` or mountinfo.
+- Verify mount type with `/proc/self/mountinfo`.
 - Treat missing host-agent export as a hard error.
 - Keep all mount paths under kubelet and `/var/lib/nas-csi`.

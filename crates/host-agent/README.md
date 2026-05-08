@@ -11,8 +11,7 @@ Responsibilities:
 - Start and supervise pinned `virtiofsd-rs` processes.
 - Create and clean `/run/nas-csi` sockets.
 - Reconcile libvirt/QEMU filesystem devices for node VMs.
-- Provide a gRPC API for the CSI controller.
-- Expose health and metrics.
+- Expose status and health output for operators and automation.
 
 The host agent is intentionally specific to this deployment. It does not need to
 support arbitrary hypervisors, remote nodes, or generic NAS protocols.
@@ -59,6 +58,10 @@ cargo run -p nas-csi-host-agent -- health \
 cargo run -p nas-csi-host-agent -- health \
   --config .nas-csi/host.yaml \
   --json
+cargo run -p nas-csi-host-agent -- cluster plan \
+  --config .nas-csi/host.yaml \
+  --artifact-dir .nas-csi/rendered \
+  --manifest-root deploy
 ```
 
 `materialize`, `render`, and default `apply` are non-mutating. `apply` renders
@@ -101,3 +104,7 @@ Both options are intentionally absent from the normal apply example.
 The `health` command reports required host tools, managed virtiofsd systemd
 units, libvirt domains, virtiofs sockets, and dataset mountpoints. Human output
 is intended for operators; `--json` is intended for automation and runbooks.
+
+The `cluster` subcommands reconcile the k3s substrate after VM/runtime apply:
+token generation, first-server startup, kubeconfig retrieval, join-node startup,
+API/node readiness, label/taint reconciliation, and substrate manifest apply.

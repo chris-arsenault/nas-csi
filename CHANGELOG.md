@@ -42,6 +42,12 @@ process are still early.
 - Initial documentation set covering architecture, VM ownership, k3s lifecycle,
   discovery, configuration, research, and operational runbooks.
 
+### Changed
+
+- Cleaned up design and project documentation to reflect the current
+  host-agent, cluster, CSI, and deployment boundaries without duplicating code
+  or manifest contents.
+
 ### Notes
 
 - `nas-csi-host-agent apply` defaults to dry-run. The `--execute` path exists

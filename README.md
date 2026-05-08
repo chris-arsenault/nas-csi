@@ -26,7 +26,7 @@ CSI remains useful for app-private storage, but it does not satisfy the
 
 - TrueNAS-hosted node VM lifecycle planning through libvirt/QEMU.
 - Host-agent-managed virtiofs transport for selected filesystem datasets.
-- k3s bootstrap planning for server and agent node VMs.
+- k3s bootstrap and substrate reconciliation for server and agent node VMs.
 - CSI controller and node-plugin crates for the Kubernetes integration surface.
 - Host-agent-owned k3s cluster reconciliation for bootstrap, join, kubeconfig,
   node readiness, labels/taints, and substrate manifests.

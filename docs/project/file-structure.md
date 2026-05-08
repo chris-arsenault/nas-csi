@@ -14,6 +14,8 @@ beside the code.
 ├── crates
 │   ├── csi-driver
 │   │   └── README.md
+│   ├── csi-proto
+│   │   └── README.md
 │   ├── cluster-manager
 │   │   └── README.md
 │   ├── discovery
@@ -36,6 +38,9 @@ beside the code.
 │   ├── cloud-init
 │   │   └── README.md
 │   ├── helm
+│   │   └── nas-csi
+│   │       └── README.md
+│   ├── kubernetes
 │   │   └── nas-csi
 │   │       └── README.md
 │   └── systemd
@@ -107,12 +112,16 @@ beside the code.
 `crates/csi-driver`
 : CSI controller service and shared CSI server bootstrap.
 
+`crates/csi-proto`
+: Generated CSI protobuf and gRPC bindings used by the controller and node
+  plugin crates.
+
 `crates/node-plugin`
 : CSI node service and Linux mount operations inside the Kubernetes node VM.
 
 `crates/xtask`
-: Developer automation: generate protobuf code, build images, package host
-  agent, run lab checks.
+: Developer automation for workspace checks, host-agent packaging, and future
+  release/lab tasks.
 
 ## Docs
 
@@ -134,9 +143,13 @@ beside the code.
 : Optional substrate add-on manifests or Helm values owned by the cluster
   manager. User applications do not live here.
 
+`deploy/kubernetes/nas-csi`
+: Static Kubernetes substrate manifests for controller Deployment, node
+  DaemonSet, RBAC, CSIDriver object, StorageClasses, and examples.
+
 `deploy/helm/nas-csi`
-: Kubernetes manifests for controller Deployment, node DaemonSet, RBAC,
-  CSIDriver object, StorageClasses, and examples.
+: Reserved for a future Helm chart wrapper. The static manifest is the current
+  installable path.
 
 `deploy/cloud-init`
 : Example cloud-init snippets for node bootstrap.

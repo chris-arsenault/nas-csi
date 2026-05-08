@@ -736,13 +736,13 @@ exports:
     #[test]
     fn parses_mountinfo_line() {
         let entry = parse_mountinfo_line(
-            "42 31 0:38 / /var/lib/nas-csi/host-datasets/repos rw,relatime - virtiofs nascsi_repos rw",
+            "42 31 0:38 / /var/lib/nas-csi/virtiofs/repos rw,relatime - virtiofs nascsi_repos rw",
         )
         .expect("parse mountinfo");
 
         assert_eq!(entry.mount_id, 42);
         assert_eq!(entry.parent_id, 31);
-        assert_eq!(entry.mount_point, "/var/lib/nas-csi/host-datasets/repos");
+        assert_eq!(entry.mount_point, "/var/lib/nas-csi/virtiofs/repos");
         assert_eq!(entry.filesystem_type, "virtiofs");
         assert_eq!(entry.source, "nascsi_repos");
     }

@@ -1,6 +1,8 @@
 # Design
 
-These documents describe the target architecture and ownership boundaries.
+These documents describe the current architecture, ownership boundaries, and
+design intent. They stay conceptual; exact CLI flags, struct fields, and
+manifest objects live in code and deploy assets.
 
 - [Architecture](architecture.md): storage model, data path, control path, CSI
   surface, and correctness boundaries.

@@ -1,16 +1,16 @@
 # crates/truenas-client
 
-Typed Rust client for the small TrueNAS API surface this project needs.
+Typed Rust primitives for the small TrueNAS API surface this project needs.
 
-Transport:
+Current shape:
 
-- JSON-RPC 2.0 over WebSocket.
-- API-key login.
-- Request IDs mapped to pending calls.
-- Event subscription support for VM/dataset changes if reliable in the target
-  TrueNAS version.
+- JSON-RPC 2.0 request/response serialization.
+- A transport trait for tests and future WebSocket integration.
+- API-key login request support.
+- Typed method wrappers for dataset, snapshot, and SMB operations currently
+  used by discovery and CSI controller planning.
 
-Initial method wrappers:
+Implemented method wrappers:
 
 - `system.info`
 - `system.ready`
@@ -18,13 +18,13 @@ Initial method wrappers:
 - `pool.dataset.create`
 - `pool.dataset.update`
 - `pool.dataset.delete`
+- `pool.snapshot.query`
 - `pool.snapshot.create`
-- `pool.snapshot.clone`
 - `pool.snapshot.delete`
 - `sharing.smb.query`
-- `service.query`
-- `vm.query`
-- `vm.device.query`
+- `sharing.smb.create`
+- `sharing.smb.update`
 
-This crate should not expose generic untyped JSON calls to the rest of the
-codebase except behind a clearly marked escape hatch for lab work.
+A production WebSocket transport, retry policy, event subscription layer, and
+additional TrueNAS APIs should be added only as the controller or host-agent
+needs them.

@@ -1,7 +1,12 @@
-# Work Tracking
+# Work Tracking Archive
 
-This tracks the remaining implementation work after the state-aware reconcile
-slice. Verification work is intentionally excluded here.
+This file records the completed implementation slices that were used to drive
+the initial build-out. It is intentionally not durable architecture
+documentation; use `docs/design` and `docs/project` for that.
+
+All sections below are complete. New temporary execution checklists can be added
+here when useful, then folded back into durable docs or removed after the work
+lands.
 
 ## 1. Execute Safety
 
@@ -57,7 +62,7 @@ slice. Verification work is intentionally excluded here.
 7. [x] Add node readiness checks.
 8. [x] Add node label and taint reconciliation.
 9. [x] Add cluster add-on reconciliation for substrate components.
-10. [x] Install or reconcile the `nas-csi` Kubernetes manifests or Helm chart.
+10. [x] Install or reconcile the `nas-csi` Kubernetes manifests.
 11. [x] Generate CSI protobuf bindings from the upstream CSI spec.
 12. [x] Implement CSI controller service bootstrap.
 13. [x] Implement `CreateVolume` for existing TrueNAS filesystem datasets.
