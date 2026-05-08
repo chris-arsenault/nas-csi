@@ -54,6 +54,11 @@ cargo run -p nas-csi-host-agent -- apply \
   --artifact-dir .nas-csi/rendered
 cargo run -p nas-csi-host-agent -- status \
   --config .nas-csi/host.yaml
+cargo run -p nas-csi-host-agent -- health \
+  --config .nas-csi/host.yaml
+cargo run -p nas-csi-host-agent -- health \
+  --config .nas-csi/host.yaml \
+  --json
 ```
 
 `materialize`, `render`, and default `apply` are non-mutating. `apply` renders
@@ -92,3 +97,7 @@ Additional explicit escape hatches exist for narrow VM operations:
   that lacks `nas-csi` metadata.
 
 Both options are intentionally absent from the normal apply example.
+
+The `health` command reports required host tools, managed virtiofsd systemd
+units, libvirt domains, virtiofs sockets, and dataset mountpoints. Human output
+is intended for operators; `--json` is intended for automation and runbooks.

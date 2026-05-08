@@ -65,6 +65,9 @@ cargo run -p nas-csi-host-agent -- apply \
 
 cargo run -p nas-csi-host-agent -- status \
   --config .nas-csi/host.yaml
+
+cargo run -p nas-csi-host-agent -- health \
+  --config .nas-csi/host.yaml
 ```
 
 Generated `.nas-csi` files are host-local state and ignored by git. `apply` is
@@ -72,6 +75,12 @@ dry-run unless `--execute` is passed. Execute refuses unsafe plans, validates
 base image existence/format/SHA-256 before root disk creation, grows but never
 shrinks root disks, waits for managed virtiofs sockets, and refuses to manage
 unmarked libvirt domains unless adoption is explicitly enabled.
+
+Build a TrueNAS host install directory with:
+
+```bash
+cargo run -p nas-csi-xtask -- package-host-agent
+```
 
 ## Documentation
 

@@ -33,18 +33,18 @@ slice. Verification work is intentionally excluded here.
 
 ## 3. Host Agent Ownership
 
-1. [ ] Package the host agent for installation on the TrueNAS host.
-2. [ ] Add a host-agent systemd unit and environment file.
-3. [ ] Define config directory layout and permissions.
-4. [ ] Define secret file paths and permissions.
-5. [ ] Define log and runtime directory layout.
-6. [ ] Add structured logs for every reconcile decision.
-7. [ ] Add structured logs for every command execution.
-8. [ ] Add health output for required host tools.
-9. [ ] Add health output for systemd units.
-10. [ ] Add health output for libvirt domains.
-11. [ ] Add health output for virtiofs sockets.
-12. [ ] Add health output for mounted datasets.
+1. [x] Package the host agent for installation on the TrueNAS host.
+2. [x] Add a host-agent systemd unit and environment file.
+3. [x] Define config directory layout and permissions.
+4. [x] Define secret file paths and permissions.
+5. [x] Define log and runtime directory layout.
+6. [x] Add structured logs for every reconcile decision.
+7. [x] Add structured logs for every command execution.
+8. [x] Add health output for required host tools.
+9. [x] Add health output for systemd units.
+10. [x] Add health output for libvirt domains.
+11. [x] Add health output for virtiofs sockets.
+12. [x] Add health output for mounted datasets.
 
 ## 4. Cluster / CSI
 

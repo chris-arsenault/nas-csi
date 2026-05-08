@@ -1,0 +1,25 @@
+[Unit]
+Description=nas-csi host agent reconcile
+Documentation=https://example.invalid/nas-csi
+Wants=network-online.target
+After=network-online.target local-fs.target libvirtd.service virtqemud.service middlewared.service
+ConditionPathExists=/etc/nas-csi/host.yaml
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/nas-csi/host-agent.env
+ExecStart=/usr/local/sbin/nas-csi-host-agent apply --config ${NAS_CSI_CONFIG} --artifact-dir ${NAS_CSI_ARTIFACT_DIR} --systemd-unit-dir ${NAS_CSI_SYSTEMD_UNIT_DIR} --execute
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=nas-csi
+RuntimeDirectoryMode=0750
+StateDirectory=nas-csi
+StateDirectoryMode=0750
+LogsDirectory=nas-csi
+LogsDirectoryMode=0750
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+

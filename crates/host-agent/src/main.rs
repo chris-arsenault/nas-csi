@@ -92,6 +92,17 @@ enum Command {
         #[arg(long, default_value = "/etc/systemd/system")]
         systemd_unit_dir: PathBuf,
     },
+    /// Report health for tools, services, domains, sockets, and datasets.
+    Health {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = ".nas-csi/rendered")]
+        artifact_dir: PathBuf,
+        #[arg(long, default_value = "/etc/systemd/system")]
+        systemd_unit_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -196,6 +207,7 @@ fn main() -> Result<()> {
                 &apply_options,
                 &actual,
             )?;
+            log_reconcile_decisions(&reconcile_plan);
             if execute {
                 let _apply_lock = ApplyLock::acquire(&apply_lock_path(&artifact_dir))?;
                 let safety = ExecuteSafety::from_config(&config, &apply_options)?;
@@ -217,6 +229,31 @@ fn main() -> Result<()> {
                 apply_options_from_config(&config, &artifact_dir, &systemd_unit_dir, false, false);
             let actual = inspect_status_state(&config, &apply_options, &runner)?;
             print_host_status(&config, &apply_options, &actual);
+            Ok(())
+        }
+        Command::Health {
+            config,
+            artifact_dir,
+            systemd_unit_dir,
+            json,
+        } => {
+            let config = load_yaml::<HostConfig>(&config)?;
+            report_validation("host config", config.validate())?;
+            let runner = RealCommandRunner;
+            let render_options = render_options_from_config(&config);
+            let apply_options =
+                apply_options_from_config(&config, &artifact_dir, &systemd_unit_dir, false, false);
+            let actual = inspect_status_state(&config, &apply_options, &runner)?;
+            let report = build_health_report(&config, &render_options, &actual)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .context("failed to serialize health report")?
+                );
+            } else {
+                print_health_report(&report);
+            }
             Ok(())
         }
     }
@@ -537,6 +574,112 @@ fn print_reconcile_operation(operation: &nas_csi_vm_manager::ReconcileOperation)
     }
 }
 
+fn log_reconcile_decisions(plan: &nas_csi_vm_manager::HostReconcilePlan) {
+    for (index, step) in plan.steps.iter().enumerate() {
+        match &step.kind {
+            nas_csi_vm_manager::ReconcileStepKind::Apply(operation) => {
+                structured_log(serde_json::json!({
+                    "event": "reconcile_decision",
+                    "stepIndex": index + 1,
+                    "decision": "apply",
+                    "description": step.description,
+                    "operation": reconcile_operation_name(operation),
+                }));
+            }
+            nas_csi_vm_manager::ReconcileStepKind::SkipAlreadyCorrect { reason } => {
+                structured_log(serde_json::json!({
+                    "event": "reconcile_decision",
+                    "stepIndex": index + 1,
+                    "decision": "skip",
+                    "description": step.description,
+                    "reason": reason,
+                }));
+            }
+            nas_csi_vm_manager::ReconcileStepKind::Refuse { operation, reason } => {
+                structured_log(serde_json::json!({
+                    "event": "reconcile_decision",
+                    "stepIndex": index + 1,
+                    "decision": "refuse",
+                    "description": step.description,
+                    "operation": operation.as_ref().map(reconcile_operation_name),
+                    "reason": reason,
+                }));
+            }
+        }
+    }
+}
+
+fn reconcile_operation_name(operation: &nas_csi_vm_manager::ReconcileOperation) -> &'static str {
+    match operation {
+        nas_csi_vm_manager::ReconcileOperation::EnsureDirectory { .. } => "EnsureDirectory",
+        nas_csi_vm_manager::ReconcileOperation::WriteRenderedArtifact { .. } => {
+            "WriteRenderedArtifact"
+        }
+        nas_csi_vm_manager::ReconcileOperation::CreateRootDisk { .. } => "CreateRootDisk",
+        nas_csi_vm_manager::ReconcileOperation::ResizeRootDisk { .. } => "ResizeRootDisk",
+        nas_csi_vm_manager::ReconcileOperation::RewriteSeedImage { .. } => "RewriteSeedImage",
+        nas_csi_vm_manager::ReconcileOperation::InstallOrUpdateSystemdUnit { .. } => {
+            "InstallOrUpdateSystemdUnit"
+        }
+        nas_csi_vm_manager::ReconcileOperation::ReloadSystemdUnits { .. } => "ReloadSystemdUnits",
+        nas_csi_vm_manager::ReconcileOperation::EnableAndStartVirtiofsdService { .. } => {
+            "EnableAndStartVirtiofsdService"
+        }
+        nas_csi_vm_manager::ReconcileOperation::RestartVirtiofsdService { .. } => {
+            "RestartVirtiofsdService"
+        }
+        nas_csi_vm_manager::ReconcileOperation::DefineDomain { .. } => "DefineDomain",
+        nas_csi_vm_manager::ReconcileOperation::RedefineDomain { .. } => "RedefineDomain",
+        nas_csi_vm_manager::ReconcileOperation::RedefineDomainRequiresShutdown { .. } => {
+            "RedefineDomainRequiresShutdown"
+        }
+        nas_csi_vm_manager::ReconcileOperation::EnableDomainAutostart { .. } => {
+            "EnableDomainAutostart"
+        }
+        nas_csi_vm_manager::ReconcileOperation::StartDomain { .. } => "StartDomain",
+        nas_csi_vm_manager::ReconcileOperation::RunCommand { .. } => "RunCommand",
+    }
+}
+
+fn log_command_start(kind: &str, command: &nas_csi_vm_manager::CommandSpec) {
+    structured_log(serde_json::json!({
+        "event": "command_start",
+        "kind": kind,
+        "program": command.program,
+        "args": command.args,
+    }));
+}
+
+fn log_command_finish(
+    kind: &str,
+    command: &nas_csi_vm_manager::CommandSpec,
+    success: bool,
+    exit_code: Option<i32>,
+) {
+    structured_log(serde_json::json!({
+        "event": "command_finish",
+        "kind": kind,
+        "program": command.program,
+        "args": command.args,
+        "success": success,
+        "exitCode": exit_code,
+    }));
+}
+
+fn log_command_error(kind: &str, command: &nas_csi_vm_manager::CommandSpec, error: &str) {
+    structured_log(serde_json::json!({
+        "event": "command_error",
+        "kind": kind,
+        "program": command.program,
+        "args": command.args,
+        "error": error,
+    }));
+}
+
+fn structured_log(value: serde_json::Value) {
+    eprintln!("{value}");
+}
+
 trait CommandRunner {
     fn status(&self, command: &nas_csi_vm_manager::CommandSpec) -> Result<bool>;
     fn output(&self, command: &nas_csi_vm_manager::CommandSpec) -> Result<Option<String>>;
@@ -554,18 +697,39 @@ struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
     fn status(&self, command: &nas_csi_vm_manager::CommandSpec) -> Result<bool> {
-        let status = ProcessCommand::new(&command.program)
+        log_command_start("status", command);
+        let status = match ProcessCommand::new(&command.program)
             .args(&command.args)
             .status()
-            .with_context(|| format!("failed to execute {command}"))?;
+        {
+            Ok(status) => status,
+            Err(error) => {
+                log_command_error("status", command, &error.to_string());
+                return Err(error).with_context(|| format!("failed to execute {command}"));
+            }
+        };
+        log_command_finish("status", command, status.success(), status.code());
         Ok(status.success())
     }
 
     fn output(&self, command: &nas_csi_vm_manager::CommandSpec) -> Result<Option<String>> {
-        let output = ProcessCommand::new(&command.program)
+        log_command_start("output", command);
+        let output = match ProcessCommand::new(&command.program)
             .args(&command.args)
             .output()
-            .with_context(|| format!("failed to execute {command}"))?;
+        {
+            Ok(output) => output,
+            Err(error) => {
+                log_command_error("output", command, &error.to_string());
+                return Err(error).with_context(|| format!("failed to execute {command}"));
+            }
+        };
+        log_command_finish(
+            "output",
+            command,
+            output.status.success(),
+            output.status.code(),
+        );
         if !output.status.success() {
             return Ok(None);
         }
@@ -1074,6 +1238,357 @@ fn print_host_status(
                 .unwrap_or("none")
         );
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+struct HostHealthReport {
+    status: String,
+    tools: Vec<ToolHealth>,
+    systemd_units: Vec<SystemdHealth>,
+    libvirt_domains: Vec<DomainHealth>,
+    virtiofs_sockets: Vec<SocketHealth>,
+    datasets: Vec<DatasetHealth>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ToolHealth {
+    name: String,
+    program: String,
+    status: String,
+    found_path: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SystemdHealth {
+    unit_name: String,
+    status: String,
+    installed: bool,
+    enabled: Option<bool>,
+    active: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DomainHealth {
+    domain: String,
+    status: String,
+    exists: bool,
+    managed: bool,
+    active: bool,
+    autostart: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SocketHealth {
+    node: String,
+    export_id: String,
+    path: String,
+    status: String,
+    exists: bool,
+    socket: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DatasetHealth {
+    export_id: String,
+    dataset: String,
+    source_path: String,
+    status: String,
+    exists: bool,
+    mounted: bool,
+}
+
+fn build_health_report(
+    config: &HostConfig,
+    render_options: &nas_csi_vm_manager::ArtifactRenderOptions,
+    actual: &nas_csi_vm_manager::HostActualState,
+) -> Result<HostHealthReport> {
+    let tools = [
+        ("virtiofsd", config.host_tools.virtiofsd.as_str()),
+        ("qemu-img", config.host_tools.qemu_img.as_str()),
+        ("virsh", config.host_tools.virsh.as_str()),
+        ("systemctl", config.host_tools.systemctl.as_str()),
+    ]
+    .into_iter()
+    .map(|(name, program)| {
+        let found_path = actual
+            .tools
+            .get(program)
+            .and_then(|state| state.path.clone());
+        ToolHealth {
+            name: name.to_string(),
+            program: program.to_string(),
+            status: health_status(found_path.is_some()),
+            found_path,
+        }
+    })
+    .collect::<Vec<_>>();
+
+    let mut systemd_units = Vec::new();
+    let mut libvirt_domains = Vec::new();
+    let mut virtiofs_sockets = Vec::new();
+    for node in &config.nodes {
+        libvirt_domains.push(domain_health(
+            &node.domain,
+            actual.domains.get(&node.domain),
+        ));
+
+        for export_id in &node.exports {
+            let unit_name = format!(
+                "{}.service",
+                nas_csi_vm_manager::virtiofsd_service_name(&node.domain, export_id)
+            );
+            systemd_units.push(systemd_health(
+                &unit_name,
+                actual.systemd_units.get(&unit_name),
+            ));
+
+            let socket_path =
+                nas_csi_vm_manager::virtiofs_socket_path(render_options, &node.domain, export_id);
+            let (exists, socket) = inspect_socket_path(&socket_path);
+            virtiofs_sockets.push(SocketHealth {
+                node: node.name.clone(),
+                export_id: export_id.clone(),
+                path: socket_path,
+                status: health_status(socket),
+                exists,
+                socket,
+            });
+        }
+    }
+
+    let mount_points = read_mount_points()?;
+    let datasets = config
+        .exports
+        .iter()
+        .map(|(export_id, export)| {
+            let exists = Path::new(&export.source_path).exists();
+            let mounted = mount_points.contains(&export.source_path);
+            DatasetHealth {
+                export_id: export_id.clone(),
+                dataset: export.dataset.clone(),
+                source_path: export.source_path.clone(),
+                status: health_status(exists && mounted),
+                exists,
+                mounted,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let degraded = tools.iter().any(is_degraded)
+        || systemd_units.iter().any(is_degraded)
+        || libvirt_domains.iter().any(is_degraded)
+        || virtiofs_sockets.iter().any(is_degraded)
+        || datasets.iter().any(is_degraded);
+
+    Ok(HostHealthReport {
+        status: health_status(!degraded),
+        tools,
+        systemd_units,
+        libvirt_domains,
+        virtiofs_sockets,
+        datasets,
+    })
+}
+
+fn print_health_report(report: &HostHealthReport) {
+    println!("health: {}", report.status);
+
+    println!();
+    println!("tools:");
+    for tool in &report.tools {
+        println!(
+            "- {}: {} ({})",
+            tool.name,
+            tool.status,
+            tool.found_path.as_deref().unwrap_or(tool.program.as_str())
+        );
+    }
+
+    println!();
+    println!("systemd units:");
+    if report.systemd_units.is_empty() {
+        println!("- none configured");
+    }
+    for unit in &report.systemd_units {
+        println!(
+            "- {}: {} installed={} enabled={} active={}",
+            unit.unit_name,
+            unit.status,
+            unit.installed,
+            optional_bool_label(unit.enabled),
+            optional_bool_label(unit.active)
+        );
+    }
+
+    println!();
+    println!("libvirt domains:");
+    if report.libvirt_domains.is_empty() {
+        println!("- none configured");
+    }
+    for domain in &report.libvirt_domains {
+        println!(
+            "- {}: {} exists={} managed={} active={} autostart={}",
+            domain.domain,
+            domain.status,
+            domain.exists,
+            domain.managed,
+            domain.active,
+            optional_bool_label(domain.autostart)
+        );
+    }
+
+    println!();
+    println!("virtiofs sockets:");
+    if report.virtiofs_sockets.is_empty() {
+        println!("- none configured");
+    }
+    for socket in &report.virtiofs_sockets {
+        println!(
+            "- {}/{}: {} path={} exists={} socket={}",
+            socket.node, socket.export_id, socket.status, socket.path, socket.exists, socket.socket
+        );
+    }
+
+    println!();
+    println!("mounted datasets:");
+    if report.datasets.is_empty() {
+        println!("- none configured");
+    }
+    for dataset in &report.datasets {
+        println!(
+            "- {}: {} dataset={} path={} exists={} mounted={}",
+            dataset.export_id,
+            dataset.status,
+            dataset.dataset,
+            dataset.source_path,
+            dataset.exists,
+            dataset.mounted
+        );
+    }
+}
+
+trait HealthItem {
+    fn status(&self) -> &str;
+}
+
+impl HealthItem for ToolHealth {
+    fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+impl HealthItem for SystemdHealth {
+    fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+impl HealthItem for DomainHealth {
+    fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+impl HealthItem for SocketHealth {
+    fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+impl HealthItem for DatasetHealth {
+    fn status(&self) -> &str {
+        &self.status
+    }
+}
+
+fn is_degraded(item: &impl HealthItem) -> bool {
+    item.status() == "degraded"
+}
+
+fn systemd_health(
+    unit_name: &str,
+    unit: Option<&nas_csi_vm_manager::SystemdUnitActualState>,
+) -> SystemdHealth {
+    let installed = unit.and_then(|unit| unit.installed_hash.as_ref()).is_some();
+    let enabled = unit.and_then(|unit| unit.enabled);
+    let active = unit.and_then(|unit| unit.active);
+    SystemdHealth {
+        unit_name: unit_name.to_string(),
+        status: health_status(installed && enabled == Some(true) && active == Some(true)),
+        installed,
+        enabled,
+        active,
+    }
+}
+
+fn domain_health(
+    domain_name: &str,
+    domain: Option<&nas_csi_vm_manager::DomainActualState>,
+) -> DomainHealth {
+    let exists = domain.map(|domain| domain.exists).unwrap_or(false);
+    let managed = domain.map(|domain| domain.managed).unwrap_or(false);
+    DomainHealth {
+        domain: domain_name.to_string(),
+        status: health_status(exists && managed),
+        exists,
+        managed,
+        active: domain.map(|domain| domain.active).unwrap_or(false),
+        autostart: domain.and_then(|domain| domain.autostart),
+    }
+}
+
+fn health_status(ok: bool) -> String {
+    if ok {
+        "ok".to_string()
+    } else {
+        "degraded".to_string()
+    }
+}
+
+fn inspect_socket_path(path: &str) -> (bool, bool) {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => (true, metadata.file_type().is_socket()),
+        Err(error) if error.kind() == ErrorKind::NotFound => (false, false),
+        Err(_) => (false, false),
+    }
+}
+
+fn read_mount_points() -> Result<BTreeSet<String>> {
+    let content = fs::read_to_string("/proc/self/mountinfo")
+        .context("failed to read /proc/self/mountinfo")?;
+    Ok(content.lines().filter_map(mountinfo_mount_point).collect())
+}
+
+fn mountinfo_mount_point(line: &str) -> Option<String> {
+    line.split(' ').nth(4).map(mountinfo_unescape)
+}
+
+fn mountinfo_unescape(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+
+        let digits = [chars.next(), chars.next(), chars.next()];
+        if let [Some(a), Some(b), Some(c)] = digits {
+            let octal = [a, b, c].iter().collect::<String>();
+            if let Ok(value) = u8::from_str_radix(&octal, 8) {
+                output.push(value as char);
+                continue;
+            }
+            output.push('\\');
+            output.push_str(&octal);
+        } else {
+            output.push('\\');
+            for digit in digits.into_iter().flatten() {
+                output.push(digit);
+            }
+        }
+    }
+    output
 }
 
 fn path_status_label(state: Option<&nas_csi_vm_manager::PathActualState>) -> String {
@@ -2316,6 +2831,16 @@ mod tests {
 
         assert_eq!(runner.status_calls.borrow().as_slice(), &[command]);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn parses_mountinfo_mount_point_escapes() {
+        let line = "42 31 0:38 / /mnt/pool/repos\\040dev rw,relatime - zfs pool/repos rw";
+
+        assert_eq!(
+            mountinfo_mount_point(line).as_deref(),
+            Some("/mnt/pool/repos dev")
+        );
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

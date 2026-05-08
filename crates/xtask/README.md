@@ -2,14 +2,25 @@
 
 Developer automation crate.
 
-Current command:
+Current commands:
 
 ```sh
 cargo run -p nas-csi-xtask -- check
+cargo run -p nas-csi-xtask -- package-host-agent
 ```
 
-This runs Rust formatting, workspace type checks, workspace tests, and example
-YAML validation.
+`check` runs Rust formatting, workspace type checks, workspace tests, and
+example YAML validation.
+
+`package-host-agent` builds the release host-agent binary and creates
+`dist/host-agent` with:
+
+- `bin/nas-csi-host-agent`
+- `nas-csi-host-agent.service`
+- `nas-csi-host-agent.env`
+- `install.sh`
+- `uninstall.sh`
+- `README.md`
 
 Planned commands:
 
@@ -17,6 +28,5 @@ Planned commands:
 - Generate host-agent protobuf bindings.
 - Build release binaries.
 - Build container images.
-- Package the host-agent systemd unit.
 - Run lab smoke tests.
 - Build or package a pinned `virtiofsd-rs` binary.

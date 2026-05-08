@@ -22,6 +22,8 @@ process are still early.
 - Host-agent command runner abstraction with fake-runner test coverage.
 - Execute safety checks for base image SHA-256/format validation, root disk
   growth, virtiofs socket readiness, and libvirt domain ownership/adoption.
+- Host-agent systemd packaging, install/uninstall scripts, structured logs, and
+  health output for tools, units, domains, sockets, and mounted datasets.
 - Discovered host tool paths in generated `HostConfig.hostTools`.
 - Initial documentation set covering architecture, VM ownership, k3s lifecycle,
   discovery, configuration, research, and operational runbooks.
