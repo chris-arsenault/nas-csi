@@ -1,4 +1,4 @@
-# Codex Project Notes
+# Agent Project Notes
 
 These notes are for coding agents working in this repository.
 
